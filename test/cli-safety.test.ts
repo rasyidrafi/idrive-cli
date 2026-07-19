@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -25,6 +25,19 @@ describe("destructive CLI safeguards", () => {
     if (isolatedDirectory) {
       await rm(isolatedDirectory, { force: true, recursive: true });
     }
+  });
+
+  it("reports the version from package.json", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
+      version: string;
+    };
+    const result = await new ProcessRunner().run(
+      executable,
+      [cli, "--version"],
+      { env: isolatedEnvironment, timeoutMs: 10_000 },
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe(packageJson.version);
   });
 
   it.each(["rm", "purge"])("requires --yes for %s", async (command) => {

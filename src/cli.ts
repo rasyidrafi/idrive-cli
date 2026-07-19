@@ -2,7 +2,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 
 import { Command } from "commander";
 
@@ -32,13 +32,14 @@ const client = new CloudDriveClient(
   engineRunner,
   locations,
 );
+const version = packageVersion();
 
 export async function main(arguments_: readonly string[] = process.argv): Promise<void> {
   const program = new Command();
   program
     .name("idrive-cli")
     .description("Headless CLI for IDrive Cloud Drive (Sync storage)")
-    .version("0.1.0")
+    .version(version)
     .showHelpAfterError();
 
   program.command("setup")
@@ -259,4 +260,18 @@ function isEntrypoint(): boolean {
   } catch {
     return path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
   }
+}
+
+function packageVersion(): string {
+  const packageFile = new URL("../package.json", import.meta.url);
+  const value = JSON.parse(readFileSync(packageFile, "utf8")) as unknown;
+  if (
+    typeof value !== "object"
+    || value === null
+    || !("version" in value)
+    || typeof value.version !== "string"
+  ) {
+    throw new Error("Unable to read the idrive-cli package version");
+  }
+  return value.version;
 }
