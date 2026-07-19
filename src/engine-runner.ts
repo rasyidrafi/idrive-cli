@@ -89,7 +89,7 @@ export class EngineRunner {
       await readFile(this.locations.manifestFile, "utf8"),
     ) as unknown;
     if (!isRecord(manifest) || !isRecord(manifest.sha256)) {
-      throw new Error("Invalid IDrive engine manifest; run idrive-cloud setup again");
+      throw new Error("Invalid IDrive engine manifest; run idrive-cli setup again");
     }
     this.activeEngineDirectory = activeDirectory(manifest, this.locations);
 

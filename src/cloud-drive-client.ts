@@ -347,7 +347,7 @@ export class CloudDriveClient {
 
   private async requireEngine(): Promise<void> {
     if (!(await this.engine.isInstalled())) {
-      throw new Error("IDrive transfer engine is not installed; run idrive-cloud setup first");
+      throw new Error("IDrive transfer engine is not installed; run idrive-cli setup first");
     }
   }
 
@@ -355,7 +355,7 @@ export class CloudDriveClient {
     await this.requireEngine();
     const profile = await this.config.load();
     if (!profile) {
-      throw new Error("Not logged in; run idrive-cloud login first");
+      throw new Error("Not logged in; run idrive-cli login first");
     }
     return profile;
   }

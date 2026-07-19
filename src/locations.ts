@@ -11,10 +11,10 @@ export interface AppLocations {
 
 export function defaultLocations(environment: NodeJS.ProcessEnv = process.env): AppLocations {
   const home = os.homedir();
-  const configRoot = environment.IDRIVE_CLOUD_CONFIG_DIR
-    ?? path.join(environment.XDG_CONFIG_HOME ?? path.join(home, ".config"), "idrive-cloud");
-  const dataDirectory = environment.IDRIVE_CLOUD_DATA_DIR
-    ?? path.join(environment.XDG_DATA_HOME ?? path.join(home, ".local", "share"), "idrive-cloud");
+  const configRoot = environment.IDRIVE_CLI_CONFIG_DIR
+    ?? path.join(environment.XDG_CONFIG_HOME ?? path.join(home, ".config"), "idrive-cli");
+  const dataDirectory = environment.IDRIVE_CLI_DATA_DIR
+    ?? path.join(environment.XDG_DATA_HOME ?? path.join(home, ".local", "share"), "idrive-cli");
 
   return {
     configFile: path.join(configRoot, "config.json"),

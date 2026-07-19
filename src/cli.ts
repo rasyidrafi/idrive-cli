@@ -36,7 +36,7 @@ const client = new CloudDriveClient(
 export async function main(arguments_: readonly string[] = process.argv): Promise<void> {
   const program = new Command();
   program
-    .name("idrive-cloud")
+    .name("idrive-cli")
     .description("Headless CLI for IDrive Cloud Drive (Sync storage)")
     .version("0.1.0")
     .showHelpAfterError();

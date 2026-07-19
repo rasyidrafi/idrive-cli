@@ -1,11 +1,11 @@
 {
   "name": "idrive-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unofficial headless CLI for IDrive Cloud Drive",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "idrive-cloud": "dist/cli.js"
+    "idrive-cli": "dist/cli.js"
   },
   "files": [
     "dist",

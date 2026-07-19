@@ -48,7 +48,7 @@ export class EngineInstaller {
     }
     const previousEngineDirectory = await this.currentEngineDirectory();
 
-    const workspace = await mkdtemp(path.join(os.tmpdir(), "idrive-cloud-setup-"));
+    const workspace = await mkdtemp(path.join(os.tmpdir(), "idrive-cli-setup-"));
     try {
       const debDirectory = path.join(workspace, "deb");
       await mkdir(debDirectory, { recursive: true });

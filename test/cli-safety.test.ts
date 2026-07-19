@@ -16,8 +16,8 @@ describe("destructive CLI safeguards", () => {
     isolatedDirectory = await mkdtemp(path.join(tmpdir(), "idrive-cli-safety-"));
     isolatedEnvironment = {
       ...process.env,
-      IDRIVE_CLOUD_CONFIG_DIR: path.join(isolatedDirectory, "config"),
-      IDRIVE_CLOUD_DATA_DIR: path.join(isolatedDirectory, "data"),
+      IDRIVE_CLI_CONFIG_DIR: path.join(isolatedDirectory, "config"),
+      IDRIVE_CLI_DATA_DIR: path.join(isolatedDirectory, "data"),
     };
   });
 
