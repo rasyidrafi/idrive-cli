@@ -1,7 +1,7 @@
 {
   "name": "idrive-cli",
   "version": "0.1.0",
-  "description": "Headless CLI for IDrive Cloud Drive",
+  "description": "Unofficial headless CLI for IDrive Cloud Drive",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -31,8 +31,19 @@
     "cloud-drive",
     "cli"
   ],
-  "author": "",
+  "author": "Muhammad Rasyid Rafi'i",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rasyidrafi/idrive-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rasyidrafi/idrive-cli/issues"
+  },
+  "homepage": "https://github.com/rasyidrafi/idrive-cli#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },

@@ -1,12 +1,27 @@
 # idrive-cloud
 
-An experimental, headless Node.js CLI for IDrive Cloud Drive (the Sync/Cloud
-Drive product). It does not target IDrive Online Backup or IDrive e2.
+An unofficial, experimental, headless Node.js CLI for IDrive Cloud Drive (the
+Sync/Cloud Drive product). It does not target IDrive Online Backup or IDrive e2.
 
 IDrive does not publish a supported Cloud Drive API. This project uses the
 private endpoints and proprietary transfer engine shipped in the official
 IDrive Linux desktop package. Expect protocol changes and verify IDrive's terms
 before using it in production.
+
+## Install
+
+Install the CLI globally from npm:
+
+```bash
+npm install -g idrive-cli
+```
+
+Then extract only the headless transfer engine from an official IDrive package:
+
+```bash
+idrive-cloud setup --deb ./IDriveForLinux.deb --trust-package
+idrive-cloud login person@example.com
+```
 
 ## Current commands
 
