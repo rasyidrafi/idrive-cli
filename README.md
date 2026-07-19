@@ -1,5 +1,8 @@
 # idrive-cloud
 
+[![npm version](https://img.shields.io/npm/v/idrive-cli.svg)](https://www.npmjs.com/package/idrive-cli)
+[![GitHub repository](https://img.shields.io/badge/source-GitHub-181717.svg)](https://github.com/rasyidrafi/idrive-cli)
+
 An unofficial, experimental, headless Node.js CLI for IDrive Cloud Drive (the
 Sync/Cloud Drive product). It does not target IDrive Online Backup or IDrive e2.
 
@@ -10,17 +13,31 @@ before using it in production.
 
 ## Install
 
-Install the CLI globally from npm:
+The CLI is published on the public npm registry as
+[`idrive-cli`](https://www.npmjs.com/package/idrive-cli). Install it globally;
+cloning or building the repository is not required:
 
 ```bash
-npm install -g idrive-cli
+npm install -g idrive-cli@latest
+idrive-cloud --version
 ```
 
-Then extract only the headless transfer engine from an official IDrive package:
+Obtain the official `IDriveForLinux.deb`, then let the CLI extract only its
+headless Cloud Drive transfer engine. The desktop package itself is not
+installed:
 
 ```bash
 idrive-cloud setup --deb ./IDriveForLinux.deb --trust-package
 idrive-cloud login person@example.com
+idrive-cloud status
+idrive-cloud ls /
+```
+
+Upgrade or uninstall the global package with npm:
+
+```bash
+npm update -g idrive-cli
+npm uninstall -g idrive-cli
 ```
 
 ## Current commands
@@ -58,20 +75,21 @@ the `.deb` and does not run the package's installer scripts. Only
 this CLI. Setup prints and records the source SHA-256, and every later command
 verifies the extracted engine binaries against the recorded manifest.
 
-## Build
+## Develop From Source
 
 ```bash
-cd /home/aio/rasyid/idrive-cli
-npm install
+git clone https://github.com/rasyidrafi/idrive-cli.git
+cd idrive-cli
+npm ci
 npm run check
 npm run build
 npm link
 ```
 
-Then extract the engine:
+The linked development build uses the same setup flow:
 
 ```bash
-idrive-cloud setup --deb /home/aio/IDriveForLinux.deb --trust-package
+idrive-cloud setup --deb ./IDriveForLinux.deb --trust-package
 idrive-cloud status
 ```
 
