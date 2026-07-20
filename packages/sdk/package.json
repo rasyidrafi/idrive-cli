@@ -1,5 +1,5 @@
 {
-  "name": "@rasyidrafi/idrive-sdk",
+  "name": "idrive-sdk",
   "version": "0.1.0",
   "description": "Unofficial server-side Node.js SDK for IDrive Cloud Drive",
   "type": "module",

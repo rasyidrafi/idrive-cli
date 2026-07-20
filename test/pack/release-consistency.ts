@@ -19,6 +19,9 @@ export function validateReleaseConsistency(
   const sdkVersion = validatedVersion(sdkPackage, "SDK", errors);
   validatedVersion(cliPackage, "CLI", errors);
 
+  validatePackageName(sdkPackage, "SDK", "idrive-sdk", errors);
+  validatePackageName(cliPackage, "CLI", "idrive-cli", errors);
+
   if (sdkPackage.private === true) errors.push("SDK package must not be private");
   if (cliPackage.private === true) errors.push("CLI package must not be private");
   if (sdkPackage.publishConfig?.access !== "public") errors.push("SDK publishConfig.access must be public");
@@ -29,13 +32,24 @@ export function validateReleaseConsistency(
 
   if (sdkVersion !== undefined) {
     const expectedRange = `^${sdkVersion}`;
-    const actualRange = cliPackage.dependencies?.["@rasyidrafi/idrive-sdk"];
+    const actualRange = cliPackage.dependencies?.["idrive-sdk"];
     if (actualRange !== expectedRange) {
       errors.push(`CLI SDK dependency must be ${expectedRange}, received ${actualRange ?? "missing"}`);
     }
   }
 
   return errors;
+}
+
+function validatePackageName(
+  package_: PackageManifest,
+  label: string,
+  expectedName: string,
+  errors: string[],
+): void {
+  if (package_.name !== expectedName) {
+    errors.push(`${label} package name must be ${expectedName}, received ${package_.name ?? "missing"}`);
+  }
 }
 
 async function main(): Promise<void> {

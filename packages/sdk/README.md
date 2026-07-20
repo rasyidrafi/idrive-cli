@@ -1,4 +1,4 @@
-# @rasyidrafi/idrive-sdk
+# idrive-sdk
 
 Unofficial server-side Node.js SDK for IDrive Cloud Drive (Sync storage). It
 uses private IDrive endpoints and the transfer engine extracted from the
@@ -8,7 +8,7 @@ not be bundled into browser code.
 ## Install
 
 ```bash
-npm install @rasyidrafi/idrive-sdk
+npm install idrive-sdk
 ```
 
 Requirements:
@@ -30,7 +30,7 @@ idrive-cli login person@example.com
 ## Use
 
 ```ts
-import { createCloudDriveClient } from "@rasyidrafi/idrive-sdk";
+import { createCloudDriveClient } from "idrive-sdk";
 
 const idrive = createCloudDriveClient();
 const entries = await idrive.list("/Documents", { detailed: true });
@@ -43,7 +43,7 @@ Applications can isolate their state from the CLI defaults:
 import {
   createCloudDriveClient,
   createEngineInstaller,
-} from "@rasyidrafi/idrive-sdk";
+} from "idrive-sdk";
 
 const locations = {
   configDirectory: "/srv/app/idrive/config",
@@ -75,7 +75,7 @@ Long-running operations accept an `AbortSignal`. Transfer operations can also
 report the percentages observed from the proprietary engine:
 
 ```ts
-import { IDriveError } from "@rasyidrafi/idrive-sdk";
+import { IDriveError } from "idrive-sdk";
 
 const controller = new AbortController();
 

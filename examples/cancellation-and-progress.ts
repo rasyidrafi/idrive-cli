@@ -1,4 +1,4 @@
-import { IDriveError, createCloudDriveClient } from "@rasyidrafi/idrive-sdk";
+import { IDriveError, createCloudDriveClient } from "idrive-sdk";
 
 const idrive = createCloudDriveClient();
 const controller = new AbortController();

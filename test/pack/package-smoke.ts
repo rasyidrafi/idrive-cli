@@ -56,7 +56,7 @@ import {
   IdriveError,
   createCloudDriveClient,
   createEngineInstaller,
-} from "@rasyidrafi/idrive-sdk";
+} from "idrive-sdk";
 import {
   CloudDriveClient as CompatibleCloudDriveClient,
   createCloudDriveClient as compatibleFactory,
@@ -88,7 +88,7 @@ import {
   createCloudDriveClient,
   createEngineInstaller,
   type CloudDriveEntry,
-} from "@rasyidrafi/idrive-sdk";
+} from "idrive-sdk";
 import { createCloudDriveClient as compatibleFactory } from "idrive-cli/dist/index.js";
 
 const client = createCloudDriveClient();

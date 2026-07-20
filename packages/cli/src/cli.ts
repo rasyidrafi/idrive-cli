@@ -18,7 +18,7 @@ import {
   IdriveError,
   normalizeRemotePath,
   ProcessRunner,
-} from "@rasyidrafi/idrive-sdk";
+} from "idrive-sdk";
 
 interface LoginCommandOptions {
   link: boolean;

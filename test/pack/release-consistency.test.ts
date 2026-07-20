@@ -4,12 +4,12 @@ import { validateReleaseConsistency } from "./release-consistency.js";
 
 const sdkPackage = {
   engines: { node: ">=22" },
-  name: "@rasyidrafi/idrive-sdk",
+  name: "idrive-sdk",
   publishConfig: { access: "public" },
   version: "0.1.0",
 };
 const cliPackage = {
-  dependencies: { "@rasyidrafi/idrive-sdk": "^0.1.0" },
+  dependencies: { "idrive-sdk": "^0.1.0" },
   engines: { node: ">=22" },
   name: "idrive-cli",
   publishConfig: { access: "public" },
@@ -26,6 +26,16 @@ describe("release metadata consistency", () => {
       { ...sdkPackage, version: "0.2.0" },
       cliPackage,
     )).toContain("CLI SDK dependency must be ^0.2.0, received ^0.1.0");
+  });
+
+  it("rejects unexpected public package names", () => {
+    const errors = validateReleaseConsistency(
+      { ...sdkPackage, name: "@example/idrive-sdk" },
+      { ...cliPackage, name: "example-cli" },
+    );
+
+    expect(errors).toContain("SDK package name must be idrive-sdk, received @example/idrive-sdk");
+    expect(errors).toContain("CLI package name must be idrive-cli, received example-cli");
   });
 
   it("rejects mismatched runtime support and unsafe publish metadata", () => {

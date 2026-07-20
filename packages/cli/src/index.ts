@@ -1,1 +1,1 @@
-export * from "@rasyidrafi/idrive-sdk";
+export * from "idrive-sdk";

@@ -56,6 +56,8 @@ jobs:
         run: |
           sdk_version=$(node -p "require('./packages/sdk/package.json').version")
           cli_version=$(node -p "require('./packages/cli/package.json').version")
+          sdk_name=$(node -p "require('./packages/sdk/package.json').name")
+          cli_name=$(node -p "require('./packages/cli/package.json').name")
 
           if [[ "$EVENT_NAME" == "push" ]]; then
             dry_run=false
@@ -77,10 +79,10 @@ jobs:
           fi
 
           if [[ "$package" == "sdk" ]]; then
-            workspace=@rasyidrafi/idrive-sdk
+            workspace="$sdk_name"
             version="$sdk_version"
           elif [[ "$package" == "cli" ]]; then
-            workspace=idrive-cli
+            workspace="$cli_name"
             version="$cli_version"
           else
             echo "Unknown package: $package" >&2
@@ -94,7 +96,7 @@ jobs:
           echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
       - name: Require the SDK release before publishing the CLI
         if: steps.release.outputs.package == 'cli' && steps.release.outputs.dry_run == 'false'
-        run: npm view "@rasyidrafi/idrive-sdk@$(node -p "require('./packages/sdk/package.json').version")" version
+        run: npm view "$(node -p "const package_ = require('./packages/sdk/package.json'); package_.name + '@' + package_.version")" version
       - name: Pack the selected workspace
         env:
           WORKSPACE: ${{ steps.release.outputs.workspace }}

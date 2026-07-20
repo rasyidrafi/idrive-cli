@@ -1,4 +1,4 @@
-import { createCloudDriveClient } from "@rasyidrafi/idrive-sdk";
+import { createCloudDriveClient } from "idrive-sdk";
 
 const idrive = createCloudDriveClient();
 const status = await idrive.status();

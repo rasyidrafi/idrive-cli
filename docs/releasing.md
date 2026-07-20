@@ -23,7 +23,7 @@ compatibility imports from the exact npm tarballs.
 
 ## First SDK publish
 
-`@rasyidrafi/idrive-sdk` must exist on npm before its GitHub trusted publisher
+`idrive-sdk` must exist on npm before its GitHub trusted publisher
 can be configured. Bootstrap only its first release using the maintainer's
 normal npm authentication and 2FA flow:
 
@@ -31,9 +31,9 @@ normal npm authentication and 2FA flow:
 npm whoami
 npm run release:check
 mkdir -p release-artifacts
-npm pack --workspace @rasyidrafi/idrive-sdk --pack-destination release-artifacts
-npm publish release-artifacts/rasyidrafi-idrive-sdk-0.1.0.tgz --access public
-npm view @rasyidrafi/idrive-sdk@0.1.0 version
+npm pack --workspace idrive-sdk --pack-destination release-artifacts
+npm publish release-artifacts/idrive-sdk-0.1.0.tgz --access public
+npm view idrive-sdk@0.1.0 version
 ```
 
 Inspect the exact tarball before publishing it. Immediately after the package
@@ -56,7 +56,7 @@ Reserve `sdk-v<version>` for OIDC-published SDK releases after `0.1.0`.
 
 ## Publish order
 
-Always publish `@rasyidrafi/idrive-sdk` first. After npm returns that exact SDK
+Always publish `idrive-sdk` first. After npm returns that exact SDK
 version from the registry, publish `idrive-cli`. The release workflow enforces
 this check for non-dry-run CLI releases.
 
@@ -80,7 +80,7 @@ sequence:
 ```bash
 git tag sdk-v0.1.1
 git push origin sdk-v0.1.1
-npm view @rasyidrafi/idrive-sdk@0.1.1 version
+npm view idrive-sdk@0.1.1 version
 # Create the SDK GitHub release from sdk-v0.1.1.
 
 git tag cli-v0.5.1

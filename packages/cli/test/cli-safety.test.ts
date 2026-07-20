@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ProcessRunner } from "@rasyidrafi/idrive-sdk";
+import { ProcessRunner } from "idrive-sdk";
 
 const executable = path.resolve("node_modules", ".bin", "tsx");
 const cli = path.resolve("packages", "cli", "src", "cli.ts");

@@ -8,19 +8,19 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @rasyidrafi/idrive-sdk && npm run build -w idrive-cli",
+    "build": "npm run build -w idrive-sdk && npm run build -w idrive-cli",
     "check": "npm run release:consistency && npm run typecheck && npm run lint && npm test && npm run pack:check",
-    "dev": "npm run build -w @rasyidrafi/idrive-sdk && tsx packages/cli/src/cli.ts",
+    "dev": "npm run build -w idrive-sdk && tsx packages/cli/src/cli.ts",
     "lint": "eslint .",
     "pack:check": "tsx test/pack/package-smoke.ts",
     "release:consistency": "tsx test/pack/release-consistency.ts",
     "release:check": "npm run check && npm run build",
-    "test": "npm run build -w @rasyidrafi/idrive-sdk && vitest run --reporter=verbose",
-    "test:coverage": "npm run build -w @rasyidrafi/idrive-sdk && vitest run --coverage --reporter=verbose",
+    "test": "npm run build -w idrive-sdk && vitest run --reporter=verbose",
+    "test:coverage": "npm run build -w idrive-sdk && vitest run --coverage --reporter=verbose",
     "test:integration": "vitest run packages/sdk/test/engine-installer.integration.test.ts",
     "test:live": "node scripts/live-test-preflight.mjs && vitest run packages/sdk/test/live-account.integration.test.ts",
     "test:watch": "vitest",
-    "typecheck": "npm run build -w @rasyidrafi/idrive-sdk && tsc --noEmit && tsc -p packages/cli/tsconfig.json --noEmit"
+    "typecheck": "npm run build -w idrive-sdk && tsc --noEmit && tsc -p packages/cli/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

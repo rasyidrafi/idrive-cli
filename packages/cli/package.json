@@ -24,7 +24,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
     "build": "npm run clean && tsc -p tsconfig.build.json",
-    "prepack": "npm --prefix ../.. run build -w @rasyidrafi/idrive-sdk && npm run build",
+    "prepack": "npm --prefix ../.. run build -w idrive-sdk && npm run build",
     "prepublishOnly": "npm --prefix ../.. run release:check"
   },
   "keywords": [
@@ -50,7 +50,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@rasyidrafi/idrive-sdk": "^0.1.0",
+    "idrive-sdk": "^0.1.0",
     "commander": "^15.0.0"
   }
 }

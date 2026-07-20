@@ -35,11 +35,11 @@ Use the SDK from trusted server-side Node.js code. It reuses the same profile,
 engine installation, transfer safety, retries, and parsers as the CLI.
 
 ```bash
-npm install @rasyidrafi/idrive-sdk
+npm install idrive-sdk
 ```
 
 ```ts
-import { createCloudDriveClient } from "@rasyidrafi/idrive-sdk";
+import { createCloudDriveClient } from "idrive-sdk";
 
 const idrive = createCloudDriveClient();
 const files = await idrive.list("/Documents", { detailed: true });
@@ -159,7 +159,7 @@ npm run test:coverage
 The repository is an npm workspace:
 
 ```text
-packages/sdk  @rasyidrafi/idrive-sdk
+packages/sdk  idrive-sdk
 packages/cli  idrive-cli
 ```
 
