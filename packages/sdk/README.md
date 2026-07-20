@@ -49,16 +49,16 @@ import {
   createEngineInstaller,
 } from "idrive-sdk";
 
-const locations = {
+const clientOptions = {
   configDirectory: "/srv/app/idrive/config",
   dataDirectory: "/srv/app/idrive/data",
   temporaryDirectory: "/srv/app/idrive/work",
 };
 
-const installer = createEngineInstaller(locations);
+const installer = createEngineInstaller(clientOptions);
 await installer.installFromDeb("/srv/install/IDriveForLinux.deb");
 
-const idrive = createCloudDriveClient(locations);
+const idrive = createCloudDriveClient(clientOptions);
 ```
 
 Calling `installFromDeb` explicitly trusts that separately obtained package.

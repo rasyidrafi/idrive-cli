@@ -1,6 +1,6 @@
 {
   "name": "idrive-cli",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Unofficial headless CLI for IDrive Cloud Drive",
   "type": "module",
   "main": "./dist/index.js",
@@ -50,7 +50,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "idrive-sdk": "^0.1.0",
+    "idrive-sdk": "^0.1.1",
     "commander": "^15.0.0"
   }
 }
