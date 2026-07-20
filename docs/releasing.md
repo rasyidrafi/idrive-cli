@@ -32,12 +32,17 @@ npm whoami
 npm run release:check
 mkdir -p release-artifacts
 npm pack --workspace idrive-sdk --pack-destination release-artifacts
-npm publish release-artifacts/idrive-sdk-0.1.0.tgz --access public
+tar -tzf release-artifacts/idrive-sdk-0.1.0.tgz
+```
+
+Review the `tar` listing, then publish and verify the exact version:
+
+```bash
+npm publish ./release-artifacts/idrive-sdk-0.1.0.tgz --access public
 npm view idrive-sdk@0.1.0 version
 ```
 
-Inspect the exact tarball before publishing it. Immediately after the package
-exists, configure its npm trusted publisher for
+Immediately after the package exists, configure its npm trusted publisher for
 `.github/workflows/release.yml`. All later SDK releases must use the GitHub OIDC
 workflow. The existing `idrive-cli` package can be configured for trusted
 publishing before releasing version `0.5.0`.

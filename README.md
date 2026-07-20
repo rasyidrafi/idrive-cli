@@ -1,6 +1,7 @@
 # IDrive Cloud Drive SDK and CLI
 
-[![npm version](https://img.shields.io/npm/v/idrive-cli.svg)](https://www.npmjs.com/package/idrive-cli)
+[![idrive-sdk version](https://img.shields.io/npm/v/idrive-sdk.svg?label=idrive-sdk)](https://www.npmjs.com/package/idrive-sdk)
+[![idrive-cli version](https://img.shields.io/npm/v/idrive-cli.svg?label=idrive-cli)](https://www.npmjs.com/package/idrive-cli)
 [![GitHub](https://img.shields.io/badge/source-GitHub-181717.svg)](https://github.com/rasyidrafi/idrive-cli)
 
 Unofficial server-side Node.js SDK and headless CLI for IDrive Cloud Drive
@@ -33,6 +34,7 @@ install the IDrive desktop application.
 
 Use the SDK from trusted server-side Node.js code. It reuses the same profile,
 engine installation, transfer safety, retries, and parsers as the CLI.
+The npm package is [`idrive-sdk`](https://www.npmjs.com/package/idrive-sdk).
 
 ```bash
 npm install idrive-sdk

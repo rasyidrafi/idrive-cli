@@ -1,5 +1,8 @@
 # idrive-sdk
 
+[![npm version](https://img.shields.io/npm/v/idrive-sdk.svg)](https://www.npmjs.com/package/idrive-sdk)
+[![source](https://img.shields.io/badge/source-GitHub-181717.svg)](https://github.com/rasyidrafi/idrive-cli/tree/main/packages/sdk)
+
 Unofficial server-side Node.js SDK for IDrive Cloud Drive (Sync storage). It
 uses private IDrive endpoints and the transfer engine extracted from the
 official IDrive for Linux package. It is not an official IDrive SDK and must
@@ -18,7 +21,8 @@ Requirements:
 - An activated IDrive Cloud Drive account.
 - A separately downloaded official `IDriveForLinux.deb` package.
 
-The simplest setup path uses the companion CLI. The SDK and CLI intentionally
+The simplest setup path uses the companion [`idrive-cli`](https://www.npmjs.com/package/idrive-cli).
+The SDK and CLI intentionally
 share the same secure profile and engine directories:
 
 ```bash
