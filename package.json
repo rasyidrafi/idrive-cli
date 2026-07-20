@@ -1,59 +1,31 @@
 {
-  "name": "idrive-cli",
-  "version": "0.4.0",
-  "description": "Unofficial headless CLI for IDrive Cloud Drive",
+  "name": "idrive-cloud-drive-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workspace for the unofficial IDrive Cloud Drive SDK and CLI",
   "type": "module",
-  "main": "dist/index.js",
-  "bin": {
-    "idrive-cli": "dist/cli.js"
-  },
-  "files": [
-    "dist",
-    "docs",
-    "README.md",
-    "LICENSE"
+  "workspaces": [
+    "packages/*"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "check": "npm run typecheck && npm run lint && npm test",
-    "dev": "tsx src/cli.ts",
+    "build": "npm run build -w @rasyidrafi/idrive-sdk && npm run build -w idrive-cli",
+    "check": "npm run release:consistency && npm run typecheck && npm run lint && npm test && npm run pack:check",
+    "dev": "npm run build -w @rasyidrafi/idrive-sdk && tsx packages/cli/src/cli.ts",
     "lint": "eslint .",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run check && npm run build",
-    "test": "vitest run",
-    "test:integration": "vitest run test/engine-installer.integration.test.ts",
-    "test:live": "node scripts/live-test-preflight.mjs && vitest run test/live-account.integration.test.ts",
+    "pack:check": "tsx test/pack/package-smoke.ts",
+    "release:consistency": "tsx test/pack/release-consistency.ts",
+    "release:check": "npm run check && npm run build",
+    "test": "npm run build -w @rasyidrafi/idrive-sdk && vitest run --reporter=verbose",
+    "test:coverage": "npm run build -w @rasyidrafi/idrive-sdk && vitest run --coverage --reporter=verbose",
+    "test:integration": "vitest run packages/sdk/test/engine-installer.integration.test.ts",
+    "test:live": "node scripts/live-test-preflight.mjs && vitest run packages/sdk/test/live-account.integration.test.ts",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
-  },
-  "keywords": [
-    "idrive",
-    "cloud-drive",
-    "cli"
-  ],
-  "author": "Muhammad Rasyid Rafi'i",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/rasyidrafi/idrive-cli.git"
-  },
-  "bugs": {
-    "url": "https://github.com/rasyidrafi/idrive-cli/issues"
-  },
-  "homepage": "https://github.com/rasyidrafi/idrive-cli#readme",
-  "publishConfig": {
-    "access": "public"
-  },
-  "engines": {
-    "node": ">=22"
-  },
-  "dependencies": {
-    "commander": "^15.0.0",
-    "fast-xml-parser": "^5.10.1"
+    "typecheck": "npm run build -w @rasyidrafi/idrive-sdk && tsc --noEmit && tsc -p packages/cli/tsconfig.json --noEmit"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.1.1",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^10.7.0",
     "tsx": "^4.23.1",
     "typescript": "^6.0.3",

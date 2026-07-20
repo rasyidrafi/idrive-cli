@@ -1,0 +1,54 @@
+{
+  "name": "@rasyidrafi/idrive-sdk",
+  "version": "0.1.0",
+  "description": "Unofficial server-side Node.js SDK for IDrive Cloud Drive",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm --prefix ../.. run release:check",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "idrive",
+    "cloud-drive",
+    "sdk"
+  ],
+  "author": "Muhammad Rasyid Rafi'i",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rasyidrafi/idrive-cli.git",
+    "directory": "packages/sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/rasyidrafi/idrive-cli/issues"
+  },
+  "homepage": "https://github.com/rasyidrafi/idrive-cli/tree/main/packages/sdk#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@types/node": "^22.0.0",
+    "fast-xml-parser": "^5.10.1"
+  }
+}

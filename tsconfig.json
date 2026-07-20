@@ -15,5 +15,12 @@
     "skipLibCheck": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src", "test", "eslint.config.js", "vitest.config.ts"]
+  "include": [
+    "packages/*/src",
+    "packages/*/test",
+    "examples",
+    "test",
+    "eslint.config.js",
+    "vitest.config.ts"
+  ]
 }

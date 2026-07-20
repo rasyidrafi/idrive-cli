@@ -3,20 +3,22 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, realpathSync } from "node:fs";
-import { readdir } from "node:fs/promises";
 
 import { Command } from "commander";
 
-import { IdDriveAuthClient } from "./auth-client.js";
-import { cleanupStaleWorkspaces, CloudDriveClient, prepareDownloadDirectory } from "./cloud-drive-client.js";
-import { ConfigStore } from "./config-store.js";
-import { EngineInstaller } from "./engine-installer.js";
-import { EngineRunner } from "./engine-runner.js";
-import { defaultLocations } from "./locations.js";
-import { ProcessRunner } from "./process-runner.js";
-import { exitCode, IdriveError } from "./errors.js";
-import { runFailFast } from "./concurrency.js";
-import { normalizeRemotePath } from "./remote-path.js";
+import {
+  cleanupStaleWorkspaces,
+  CloudDriveClient,
+  ConfigStore,
+  defaultLocations,
+  EngineInstaller,
+  EngineRunner,
+  exitCode,
+  IdDriveAuthClient,
+  IdriveError,
+  normalizeRemotePath,
+  ProcessRunner,
+} from "@rasyidrafi/idrive-sdk";
 
 interface LoginCommandOptions {
   link: boolean;
@@ -38,6 +40,7 @@ const client = new CloudDriveClient(
   new ConfigStore(locations.configFile),
   engineRunner,
   locations,
+  16,
 );
 const version = packageVersion();
 let terminationSignal: NodeJS.Signals | undefined;
@@ -442,7 +445,7 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
     .argument("<local-directory>")
     .argument("[remote-directory]", "Cloud Drive destination", "/")
     .action(async (localDirectory: string, remoteDirectory: string) => {
-      await uploadTree(client, localDirectory, remoteDirectory, operationOptions());
+      await client.uploadDirectory(localDirectory, remoteDirectory, operationOptions());
       writeSuccess(`${operationOptions().dryRun ? "Would upload" : "Uploaded"} directory ${localDirectory}\n`, { dryRun: operationOptions().dryRun === true, localDirectory: path.resolve(localDirectory), remoteDirectory });
     });
 
@@ -451,22 +454,7 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
     .argument("<remote-directory>")
     .argument("[destination]", "local destination", ".")
     .action(async (remoteDirectory: string, destination: string) => {
-      const entries = await client.listRecursive(remoteDirectory, operationOptions());
-      if (!operationOptions().dryRun) await prepareDownloadDirectory(destination, remoteDirectory);
-      for (const entry of entries) {
-        if (entry.type === "directory" && !operationOptions().dryRun) {
-          await prepareDownloadDirectory(destination, entry.path);
-        }
-      }
-      const downloadOptions = operationOptions();
-      const files = entries.filter((entry) => entry.type === "file").map((entry) => entry.path);
-      await runFailFast(
-        chunkForWorkers(files, downloadOptions.transfers),
-        downloadOptions.signal,
-        async (batch, signal) => {
-          await client.downloadBatch(batch, destination, { ...downloadOptions, signal });
-        },
-      );
+      await client.downloadDirectory(remoteDirectory, destination, operationOptions());
       writeSuccess(`${operationOptions().dryRun ? "Would download" : "Downloaded"} directory /${remoteDirectory.replace(/^\/+|\/+$/g, "")}\n`, { destination: path.resolve(destination), dryRun: operationOptions().dryRun === true, remoteDirectory });
     });
 
@@ -626,53 +614,6 @@ async function readSecret(prompt: string, signal?: AbortSignal): Promise<string>
     if (signal?.aborted) onAbort();
   });
 
-}
-
-async function uploadTree(
-  cloudClient: CloudDriveClient,
-  localRoot: string,
-  remoteRoot: string,
-  options: { dryRun?: boolean; transfers?: number },
-): Promise<void> {
-  normalizeRemotePath(remoteRoot);
-  const resolvedRoot = path.resolve(localRoot);
-  const files: string[] = [];
-  const directories: string[] = [];
-  const visit = async (localDirectory: string, remoteDirectory: string): Promise<void> => {
-    if (remoteDirectory.replace(/^\/+|\/+$/g, "")) {
-      directories.push(remoteDirectory);
-    }
-    const entries = await readdir(localDirectory, { withFileTypes: true });
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      const localPath = path.join(localDirectory, entry.name);
-      const remotePath = [remoteDirectory.replace(/\/+$/, ""), entry.name].filter(Boolean).join("/");
-      normalizeRemotePath(remotePath);
-      if (entry.isSymbolicLink()) throw new Error(`Refusing to upload symbolic link: ${localPath}`);
-      if (entry.isDirectory()) await visit(localPath, remotePath);
-      else if (entry.isFile()) files.push(path.relative(resolvedRoot, localPath).split(path.sep).join("/"));
-      else throw new Error(`Unsupported local file type: ${localPath}`);
-    }
-  };
-  await visit(resolvedRoot, remoteRoot);
-  let prepared: Promise<void> | undefined;
-  const prepare = async (): Promise<void> => {
-    prepared ??= (async () => {
-      for (const directory of directories) await cloudClient.createDirectory(directory, options);
-    })();
-    await prepared;
-  };
-  await cloudClient.uploadBatch(resolvedRoot, files, remoteRoot, options, prepare);
-}
-
-function chunkForWorkers<T>(values: readonly T[], workers: number): T[][] {
-  if (values.length === 0) return [[]];
-  const chunkSize = Math.ceil(values.length / workers);
-  const chunks: T[][] = [];
-  for (let index = 0; index < values.length; index += chunkSize) {
-    chunks.push(values.slice(index, index + chunkSize));
-  }
-  return chunks;
 }
 
 function formatBytes(value: number): string {

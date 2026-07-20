@@ -5,10 +5,10 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ProcessRunner } from "../src/process-runner.js";
+import { ProcessRunner } from "@rasyidrafi/idrive-sdk";
 
 const executable = path.resolve("node_modules", ".bin", "tsx");
-const cli = path.resolve("src", "cli.ts");
+const cli = path.resolve("packages", "cli", "src", "cli.ts");
 let isolatedDirectory = "";
 let isolatedEnvironment: NodeJS.ProcessEnv;
 
@@ -29,7 +29,7 @@ describe("destructive CLI safeguards", () => {
   });
 
   it("reports the version from package.json", async () => {
-    const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
+    const packageJson = JSON.parse(await readFile("packages/cli/package.json", "utf8")) as {
       version: string;
     };
     const result = await new ProcessRunner().run(

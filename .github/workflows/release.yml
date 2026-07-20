@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - sdk-v*
+      - cli-v*
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to pack or publish
+        required: true
+        type: choice
+        options:
+          - sdk
+          - cli
+      dist_tag:
+        description: npm distribution tag
+        default: latest
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate without publishing
+        default: true
+        required: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: npm
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          node-version: 22.x
+          registry-url: https://registry.npmjs.org
+      - name: Use an npm CLI with trusted publishing support
+        run: npm install --global "npm@^11.5.1"
+      - run: npm ci
+      - run: npm run release:check
+      - name: Select and validate release
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DIST_TAG: ${{ inputs.dist_tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          sdk_version=$(node -p "require('./packages/sdk/package.json').version")
+          cli_version=$(node -p "require('./packages/cli/package.json').version")
+
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            dry_run=false
+            dist_tag=latest
+            case "$REF_NAME" in
+              "sdk-v$sdk_version") package=sdk ;;
+              "cli-v$cli_version") package=cli ;;
+              *) echo "Tag does not match a package version: $REF_NAME" >&2; exit 1 ;;
+            esac
+          else
+            package="$INPUT_PACKAGE"
+            dry_run="$INPUT_DRY_RUN"
+            dist_tag="$INPUT_DIST_TAG"
+          fi
+
+          if [[ ! "$dist_tag" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Invalid npm distribution tag: $dist_tag" >&2
+            exit 1
+          fi
+
+          if [[ "$package" == "sdk" ]]; then
+            workspace=@rasyidrafi/idrive-sdk
+            version="$sdk_version"
+          elif [[ "$package" == "cli" ]]; then
+            workspace=idrive-cli
+            version="$cli_version"
+          else
+            echo "Unknown package: $package" >&2
+            exit 1
+          fi
+
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+          echo "workspace=$workspace" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+      - name: Require the SDK release before publishing the CLI
+        if: steps.release.outputs.package == 'cli' && steps.release.outputs.dry_run == 'false'
+        run: npm view "@rasyidrafi/idrive-sdk@$(node -p "require('./packages/sdk/package.json').version")" version
+      - name: Pack the selected workspace
+        env:
+          WORKSPACE: ${{ steps.release.outputs.workspace }}
+        run: |
+          mkdir release-artifacts
+          npm pack --workspace "$WORKSPACE" --pack-destination release-artifacts
+          test "$(find release-artifacts -maxdepth 1 -name '*.tgz' | wc -l)" -eq 1
+      - name: Validate publish contents
+        if: steps.release.outputs.dry_run == 'true'
+        env:
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+        run: npm publish release-artifacts/*.tgz --dry-run --tag "$DIST_TAG"
+      - name: Publish with npm trusted publishing
+        if: steps.release.outputs.dry_run == 'false'
+        env:
+          DIST_TAG: ${{ steps.release.outputs.dist_tag }}
+        run: npm publish release-artifacts/*.tgz --access public --provenance --tag "$DIST_TAG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.package }}-${{ steps.release.outputs.version }}
+          path: release-artifacts/*.tgz
+          if-no-files-found: error

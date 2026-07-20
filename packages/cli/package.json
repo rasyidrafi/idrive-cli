@@ -1,0 +1,56 @@
+{
+  "name": "idrive-cli",
+  "version": "0.5.0",
+  "description": "Unofficial headless CLI for IDrive Cloud Drive",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "idrive-cli": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prepack": "npm --prefix ../.. run build -w @rasyidrafi/idrive-sdk && npm run build",
+    "prepublishOnly": "npm --prefix ../.. run release:check"
+  },
+  "keywords": [
+    "idrive",
+    "cloud-drive",
+    "cli"
+  ],
+  "author": "Muhammad Rasyid Rafi'i",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rasyidrafi/idrive-cli.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/rasyidrafi/idrive-cli/issues"
+  },
+  "homepage": "https://github.com/rasyidrafi/idrive-cli#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@rasyidrafi/idrive-sdk": "^0.1.0",
+    "commander": "^15.0.0"
+  }
+}

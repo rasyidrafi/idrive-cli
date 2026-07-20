@@ -1,10 +1,10 @@
-# idrive-cli
+# IDrive Cloud Drive SDK and CLI
 
 [![npm version](https://img.shields.io/npm/v/idrive-cli.svg)](https://www.npmjs.com/package/idrive-cli)
 [![GitHub](https://img.shields.io/badge/source-GitHub-181717.svg)](https://github.com/rasyidrafi/idrive-cli)
 
-Unofficial headless CLI for IDrive Cloud Drive (Sync storage). It does not
-support IDrive Online Backup or IDrive e2.
+Unofficial server-side Node.js SDK and headless CLI for IDrive Cloud Drive
+(Sync storage). They do not support IDrive Online Backup or IDrive e2.
 
 IDrive does not provide a public Cloud Drive API. This project uses private
 endpoints and the transfer engine from the official Linux package.
@@ -28,6 +28,28 @@ idrive-cli status
 
 The setup command extracts only the headless transfer engine. It does not
 install the IDrive desktop application.
+
+## SDK
+
+Use the SDK from trusted server-side Node.js code. It reuses the same profile,
+engine installation, transfer safety, retries, and parsers as the CLI.
+
+```bash
+npm install @rasyidrafi/idrive-sdk
+```
+
+```ts
+import { createCloudDriveClient } from "@rasyidrafi/idrive-sdk";
+
+const idrive = createCloudDriveClient();
+const files = await idrive.list("/Documents", { detailed: true });
+await idrive.download("/Documents/report.pdf", "./downloads");
+```
+
+The SDK is Linux-only, requires the official transfer engine to be installed,
+and must never be bundled into browser code. A web file manager should call it
+from a backend service or worker and expose only an authenticated application
+API to the browser.
 
 ## Commands
 
@@ -128,6 +150,22 @@ npm run check
 npm run build
 ```
 
+Coverage uses the same unit suite with conservative regression thresholds:
+
+```bash
+npm run test:coverage
+```
+
+The repository is an npm workspace:
+
+```text
+packages/sdk  @rasyidrafi/idrive-sdk
+packages/cli  idrive-cli
+```
+
+The CLI depends on and re-exports the SDK for compatibility. New applications
+should depend directly on the SDK package.
+
 Optional integration tests:
 
 ```bash
@@ -140,6 +178,9 @@ npm run test:live
 ```
 
 The live suite uses a unique remote directory and removes it after testing.
+
+Release metadata, package ordering, npm trusted publishing, and tag conventions
+are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## Limitations
 

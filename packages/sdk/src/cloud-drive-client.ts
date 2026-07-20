@@ -66,11 +66,18 @@ import type { CommandResult } from "./process-runner.js";
 import { readTextFileLimited } from "./bounded-input.js";
 import { ensurePrivateDirectory } from "./secure-directory.js";
 import { IdriveError } from "./errors.js";
+import { OperationLimiter, runFailFast } from "./concurrency.js";
 
 export interface LoginOptions {
   linkMachine?: boolean;
   privateKeyProvider?: () => Promise<string>;
   signal?: AbortSignal;
+}
+
+export interface LoginResult {
+  email: string;
+  encryptionType: StoredProfile["encryptionType"];
+  server: string;
 }
 
 export async function cleanupStaleWorkspaces(
@@ -102,25 +109,45 @@ export async function prepareDownloadDirectory(destination: string, remotePath: 
   return current;
 }
 
-export interface OperationOptions {
-  bandwidthKbps?: number;
-  dryRun?: boolean;
+export interface ExecutionOptions {
   onProgress?: (percent: number) => void;
-  retries?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+export interface ReadOperationOptions extends ExecutionOptions {
+  retries?: number;
+}
+
+export interface MutationOperationOptions extends ExecutionOptions {
+  dryRun?: boolean;
+}
+
+export interface TransferOperationOptions extends MutationOperationOptions {
+  bandwidthKbps?: number;
+}
+
+export interface DirectoryDownloadOptions extends TransferOperationOptions {
+  retries?: number;
   transfers?: number;
 }
 
-export interface ListOperationOptions extends OperationOptions {
+export interface ListOperationOptions extends ReadOperationOptions {
   detailed?: boolean;
   trash?: boolean;
 }
 
-export interface SearchOperationOptions extends OperationOptions {
+export interface SearchOperationOptions extends ReadOperationOptions {
   remotePath?: string;
   trash?: boolean;
 }
+
+type InternalOperationOptions = ExecutionOptions & {
+  bandwidthKbps?: number;
+  dryRun?: boolean;
+  retries?: number;
+  transfers?: number;
+};
 
 export interface ClientStatus {
   email?: string;
@@ -171,20 +198,25 @@ const RESULT_REPORT_MAX_BYTES = 16 * 1024 * 1024;
 const ERROR_REPORT_MAX_BYTES = 1024 * 1024;
 
 export class CloudDriveClient {
+  private readonly operationLimiter: OperationLimiter;
+
   public constructor(
     private readonly auth: AuthTransport,
     private readonly config: ProfileStore,
     private readonly engine: TransferEngine,
     private readonly locations: AppLocations,
-  ) {}
+    maxConcurrentOperations = 1,
+  ) {
+    this.operationLimiter = new OperationLimiter(maxConcurrentOperations);
+  }
 
   public async login(
     email: string,
     password: string,
     options: LoginOptions = {},
-  ): Promise<StoredProfile> {
+  ): Promise<LoginResult> {
     if (email.trim().length === 0 || password.length === 0) {
-      throw new Error("IDrive email and password are required");
+      throw new IdriveError("usage", "IDrive email and password are required", "login");
     }
     await this.requireEngine();
     let result: AuthenticationResult;
@@ -196,27 +228,27 @@ export class CloudDriveClient {
       throw new IdriveError("auth", error instanceof Error ? error.message : "IDrive authentication failed", "login", false, { cause: error });
     }
     if (result.account.encryptionType !== result.server.encryptionType) {
-      throw new Error("IDrive returned inconsistent encryption settings");
+      throw new IdriveError("auth", "IDrive returned inconsistent encryption settings", "login");
     }
 
     let encryptionKey = "DEFAULT";
     if (result.account.encryptionType === "PRIVATE") {
       if (!options.privateKeyProvider) {
-        throw new Error("This IDrive account requires a private encryption key");
+        throw new IdriveError("auth", "This IDrive account requires a private encryption key", "login");
       }
       encryptionKey = await options.privateKeyProvider();
       if (encryptionKey.length === 0) {
-        throw new Error("The private encryption key cannot be empty");
+        throw new IdriveError("auth", "The private encryption key cannot be empty", "login");
       }
     }
 
+    const encodeSecret = async (value: string): Promise<string> =>
+      await this.operationLimiter.run("login", options.signal, async () => options.signal
+        ? await this.engine.encodeSecret(value, options.signal)
+        : await this.engine.encodeSecret(value));
     const [encodedPassword, encodedPrivateKey] = await Promise.all([
-      options.signal
-        ? this.engine.encodeSecret(result.account.syncPassword, options.signal)
-        : this.engine.encodeSecret(result.account.syncPassword),
-      options.signal
-        ? this.engine.encodeSecret(encryptionKey, options.signal)
-        : this.engine.encodeSecret(encryptionKey),
+      encodeSecret(result.account.syncPassword),
+      encodeSecret(encryptionKey),
     ]);
     const profile: StoredProfile = {
       dedup: result.server.dedup,
@@ -232,9 +264,7 @@ export class CloudDriveClient {
         await this.validatePrivateProfile(profile, options.signal);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`Private encryption key could not be verified: ${detail}`, {
-          cause: error,
-        });
+        throw new IdriveError("auth", `Private encryption key could not be verified: ${detail}`, "login", false, { cause: error });
       }
     }
     if (options.linkMachine !== false) {
@@ -243,7 +273,11 @@ export class CloudDriveClient {
       else await this.auth.linkMachine(...linkArguments);
     }
     await this.config.save(profile);
-    return profile;
+    return {
+      email: profile.email,
+      encryptionType: profile.encryptionType,
+      server: profile.server,
+    };
   }
 
   public async logout(): Promise<void> {
@@ -265,11 +299,16 @@ export class CloudDriveClient {
   public async upload(
     localFile: string,
     remoteDirectory = "/",
-    options: OperationOptions = {},
+    options: TransferOperationOptions = {},
   ): Promise<void> {
     validateOperationOptions(options);
     const source = path.resolve(localFile);
-    const sourceStat = await lstat(source);
+    let sourceStat: Awaited<ReturnType<typeof lstat>>;
+    try {
+      sourceStat = await lstat(source);
+    } catch (error) {
+      throw new IdriveError("local-io", `Unable to read upload source: ${source}`, "upload", false, { cause: error });
+    }
     if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
       throw new Error(`Upload source is not a file: ${source}`);
     }
@@ -305,7 +344,7 @@ export class CloudDriveClient {
     localRoot: string,
     relativeFiles: readonly string[],
     remoteDirectory = "/",
-    options: OperationOptions = {},
+    options: TransferOperationOptions = {},
     prepareRemote?: () => Promise<void>,
   ): Promise<void> {
     validateOperationOptions(options);
@@ -353,7 +392,7 @@ export class CloudDriveClient {
   public async downloadBatch(
     remoteFiles: readonly string[],
     destination = ".",
-    options: OperationOptions = {},
+    options: TransferOperationOptions = {},
   ): Promise<string[]> {
     validateOperationOptions(options);
     if (remoteFiles.length === 0) return [];
@@ -390,6 +429,99 @@ export class CloudDriveClient {
       }
       return published;
     });
+  }
+
+  public async uploadDirectory(
+    localDirectory: string,
+    remoteDirectory = "/",
+    options: TransferOperationOptions = {},
+  ): Promise<void> {
+    validateOperationOptions(options);
+    const remoteRoot = normalizeRemotePath(remoteDirectory);
+    const resolvedInput = path.resolve(localDirectory);
+    let localRoot: string;
+    try {
+      const rootMetadata = await lstat(resolvedInput);
+      if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+        throw new IdriveError("local-io", `Upload source is not a directory: ${resolvedInput}`, "upload directory");
+      }
+      localRoot = await realpath(resolvedInput);
+    } catch (error) {
+      if (error instanceof IdriveError) throw error;
+      throw new IdriveError("local-io", `Unable to read upload directory: ${resolvedInput}`, "upload directory", false, { cause: error });
+    }
+    const files: string[] = [];
+    const directories: string[] = [];
+    const visit = async (localPath: string, remotePath: string): Promise<void> => {
+      if (remotePath) directories.push(remotePath);
+      const entries = await readdir(localPath, { withFileTypes: true });
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        const source = path.join(localPath, entry.name);
+        const destination = [remotePath, entry.name].filter(Boolean).join("/");
+        normalizeRemotePath(destination);
+        if (entry.isSymbolicLink()) {
+          throw new IdriveError("local-io", `Refusing to upload symbolic link: ${source}`, "upload directory");
+        }
+        if (entry.isDirectory()) await visit(source, destination);
+        else if (entry.isFile()) files.push(path.relative(localRoot, source).split(path.sep).join("/"));
+        else throw new IdriveError("local-io", `Unsupported local file type: ${source}`, "upload directory");
+      }
+    };
+    try {
+      await visit(localRoot, remoteRoot);
+    } catch (error) {
+      if (error instanceof IdriveError) throw error;
+      throw new IdriveError("local-io", `Unable to traverse upload directory: ${localRoot}`, "upload directory", false, { cause: error });
+    }
+    let prepared: Promise<void> | undefined;
+    const prepareRemote = async (): Promise<void> => {
+      prepared ??= (async () => {
+        for (const directory of directories) await this.createDirectory(directory, options);
+      })();
+      await prepared;
+    };
+    await this.uploadBatch(localRoot, files, remoteRoot, options, prepareRemote);
+  }
+
+  public async downloadDirectory(
+    remoteDirectory: string,
+    destination = ".",
+    options: DirectoryDownloadOptions = {},
+  ): Promise<string[]> {
+    validateOperationOptions(options);
+    const remoteRoot = normalizeRemotePath(remoteDirectory);
+    const entries = await this.listRecursive(remoteRoot, {
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(options.retries === undefined ? {} : { retries: options.retries }),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
+    if (!options.dryRun) {
+      await prepareDownloadDirectory(destination, remoteRoot);
+      for (const entry of entries) {
+        if (entry.type === "directory") await prepareDownloadDirectory(destination, entry.path);
+      }
+    }
+    const files = entries.filter((entry) => entry.type === "file").map((entry) => entry.path);
+    if (files.length === 0) return [];
+    const chunks = chunkForWorkers(files, options.transfers ?? 1);
+    const results: string[][] = Array.from({ length: chunks.length }, () => []);
+    const parentSignal = options.signal ?? new AbortController().signal;
+    await runFailFast(
+      chunks.map((files_, index) => ({ files: files_, index })),
+      parentSignal,
+      async (batch, signal) => {
+        results[batch.index] = await this.downloadBatch(batch.files, destination, {
+          ...(options.bandwidthKbps === undefined ? {} : { bandwidthKbps: options.bandwidthKbps }),
+          ...(options.dryRun === undefined ? {} : { dryRun: options.dryRun }),
+          ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+          signal,
+          ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        });
+      },
+    );
+    return results.flat();
   }
 
   public async list(remotePath = "/", options: ListOperationOptions = {}): Promise<CloudDriveEntry[]> {
@@ -442,7 +574,7 @@ export class CloudDriveClient {
     });
   }
 
-  public async stat(remotePath: string, options: OperationOptions = {}): Promise<CloudDriveEntry | null> {
+  public async stat(remotePath: string, options: ReadOperationOptions = {}): Promise<CloudDriveEntry | null> {
     validateOperationOptions(options);
     const normalized = normalizeRemotePath(remotePath);
     if (!normalized) return { name: "", type: "directory" };
@@ -452,7 +584,7 @@ export class CloudDriveClient {
 
   public async listRecursive(
     remotePath = "/",
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<RecursiveCloudDriveEntry[]> {
     validateOperationOptions(options);
     const root = normalizeRemotePath(remotePath);
@@ -473,12 +605,12 @@ export class CloudDriveClient {
   public async download(
     remoteFile: string,
     destination = ".",
-    options: OperationOptions = {},
+    options: TransferOperationOptions = {},
   ): Promise<string> {
     validateOperationOptions(options);
     const normalized = normalizeRemotePath(remoteFile);
     if (normalized.length === 0) {
-      throw new Error("A remote file path is required");
+      throw new IdriveError("usage", "A remote file path is required", "download");
     }
     if (options.dryRun) return path.join(path.resolve(destination), ...normalized.split("/"));
     const profile = await this.requireProfile();
@@ -514,7 +646,7 @@ export class CloudDriveClient {
     });
   }
 
-  public async createDirectory(remotePath: string, options: OperationOptions = {}): Promise<void> {
+  public async createDirectory(remotePath: string, options: MutationOperationOptions = {}): Promise<void> {
     validateOperationOptions(options);
     if (!normalizeRemotePath(remotePath)) throw new IdriveError("usage", "Cannot create the Cloud Drive root");
     if (options.dryRun) return;
@@ -532,7 +664,7 @@ export class CloudDriveClient {
   public async renameRemote(
     oldPath: string,
     newPath: string,
-    options: OperationOptions = {},
+    options: MutationOperationOptions = {},
   ): Promise<void> {
     validateOperationOptions(options);
     const oldNormalized = requiredRemotePath(oldPath, "rename source");
@@ -546,7 +678,7 @@ export class CloudDriveClient {
   public async copyRemote(
     remotePaths: readonly string[],
     destination: string,
-    options: OperationOptions = {},
+    options: MutationOperationOptions = {},
   ): Promise<void> {
     validateOperationOptions(options);
     const sources = normalizeRequiredPaths(remotePaths, "copy source");
@@ -558,14 +690,14 @@ export class CloudDriveClient {
 
   public async listTrash(
     remotePath = "/",
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveEntry[]> {
     return await this.list(remotePath, { ...options, detailed: true, trash: true });
   }
 
   public async restoreTrash(
     remotePaths: readonly string[],
-    options: OperationOptions = {},
+    options: MutationOperationOptions = {},
   ): Promise<void> {
     validateOperationOptions(options);
     const paths = normalizeRequiredPaths(remotePaths, "trash path");
@@ -574,7 +706,7 @@ export class CloudDriveClient {
       buildRestoreTrashCommand(profile, { errorFile, fileList, reportFile }));
   }
 
-  public async emptyTrash(options: OperationOptions = {}): Promise<void> {
+  public async emptyTrash(options: MutationOperationOptions = {}): Promise<void> {
     validateOperationOptions(options);
     if (options.dryRun) return;
     await this.runReportMutation("empty trash", options, (profile, reportFile, errorFile) =>
@@ -600,7 +732,7 @@ export class CloudDriveClient {
 
   public async properties(
     remotePath: string,
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveProperties> {
     const normalized = requiredRemotePath(remotePath, "remote path");
     return await this.runParsedReport("properties", options, parsePropertiesReport, (profile, reportFile, errorFile) =>
@@ -609,7 +741,7 @@ export class CloudDriveClient {
 
   public async directorySize(
     remotePath: string,
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveDirectorySize> {
     const normalized = requiredRemotePath(remotePath, "directory path");
     return await this.runParsedReport("directory size", options, parseDirectorySizeReport, (profile, reportFile, errorFile) =>
@@ -618,7 +750,7 @@ export class CloudDriveClient {
 
   public async itemsStatus(
     remotePaths: readonly string[],
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveItemStatus[]> {
     const paths = normalizeRequiredPaths(remotePaths, "status path");
     return await this.runFileListReport("item status", paths, options, parseItemsStatusReport,
@@ -627,7 +759,7 @@ export class CloudDriveClient {
 
   public async versions(
     remotePath: string,
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveVersion[]> {
     const normalized = requiredRemotePath(remotePath, "file path");
     return await this.runParsedReport("versions", options, parseVersionsReport, (profile, reportFile, errorFile) =>
@@ -636,7 +768,7 @@ export class CloudDriveClient {
 
   public async changes(
     cursor = "0",
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveChanges> {
     if (!/^\d+$/.test(cursor)) throw new IdriveError("usage", "Cloud Drive change cursor must contain only digits");
     const result = await this.runParsedReport("changes", options, parseChangesReport, (profile, reportFile, errorFile) =>
@@ -647,12 +779,12 @@ export class CloudDriveClient {
     };
   }
 
-  public async serverVersion(options: OperationOptions = {}): Promise<CloudDriveEngineVersion> {
+  public async serverVersion(options: ReadOperationOptions = {}): Promise<CloudDriveEngineVersion> {
     return await this.runParsedReport("server version", options, parseServerVersionReport,
       (profile, reportFile, errorFile) => buildServerVersionCommand(profile, { errorFile, reportFile }), true);
   }
 
-  public async clientVersion(options: OperationOptions = {}): Promise<CloudDriveEngineVersion> {
+  public async clientVersion(options: ExecutionOptions = {}): Promise<CloudDriveEngineVersion> {
     validateOperationOptions(options);
     await this.requireEngine();
     const profile = await this.config.load();
@@ -660,14 +792,13 @@ export class CloudDriveClient {
     try {
       const arguments_ = buildClientVersionCommand();
       const timeoutMs = options.timeoutMs ?? operationTimeout("client version");
-      if (profile) {
-        result = await this.engine.execute(profile, arguments_, timeoutMs, options.signal);
-      } else {
+      result = await this.operationLimiter.run("client version", options.signal, async () => {
+        if (profile) return await this.engine.execute(profile, arguments_, timeoutMs, options.signal);
         if (!this.engine.executeLocal) {
           throw new IdriveError("engine", "The configured transfer engine cannot run local commands", "client version");
         }
-        result = await this.engine.executeLocal(arguments_, timeoutMs, options.signal);
-      }
+        return await this.engine.executeLocal(arguments_, timeoutMs, options.signal);
+      });
     } catch (error) {
       if (error instanceof IdriveError) throw error;
       if (options.signal?.aborted) {
@@ -688,18 +819,18 @@ export class CloudDriveClient {
     }
   }
 
-  public async remove(remotePath: string, options: OperationOptions = {}): Promise<void> {
+  public async remove(remotePath: string, options: MutationOperationOptions = {}): Promise<void> {
     await this.runRemoteDeletion(remotePath, false, options);
   }
 
-  public async purgeTrash(remotePath: string, options: OperationOptions = {}): Promise<void> {
+  public async purgeTrash(remotePath: string, options: MutationOperationOptions = {}): Promise<void> {
     await this.runRemoteDeletion(remotePath, true, options);
   }
 
   private async runRemoteDeletion(
     remotePath: string,
     permanent: boolean,
-    options: OperationOptions,
+    options: MutationOperationOptions,
   ): Promise<void> {
     validateOperationOptions(options);
     const normalized = normalizeRemotePath(remotePath);
@@ -733,7 +864,7 @@ export class CloudDriveClient {
     });
   }
 
-  public async quota(options: OperationOptions = {}): Promise<CloudDriveQuota> {
+  public async quota(options: ReadOperationOptions = {}): Promise<CloudDriveQuota> {
     validateOperationOptions(options);
     const profile = await this.requireProfile();
     return await this.runQuota(profile, "quota", options);
@@ -742,7 +873,7 @@ export class CloudDriveClient {
   private async runQuota(
     profile: StoredProfile,
     operation: string,
-    options: OperationOptions = {},
+    options: ReadOperationOptions = {},
   ): Promise<CloudDriveQuota> {
     let lastError: unknown;
     const attempts = options.retries ?? 5;
@@ -763,7 +894,7 @@ export class CloudDriveClient {
   private async runQuotaAttempt(
     profile: StoredProfile,
     operation: string,
-    options: OperationOptions,
+    options: ReadOperationOptions,
   ): Promise<CloudDriveQuota> {
     return await this.withOperationWorkspace(async (workspace) => {
       const report = path.join(workspace, "report.xml");
@@ -803,9 +934,9 @@ export class CloudDriveClient {
   ): Promise<CommandResult> {
     let result: CommandResult;
     try {
-      result = signal
+      result = await this.operationLimiter.run(operation, signal, async () => signal
         ? await this.engine.execute(profile, arguments_, timeoutMs ?? operationTimeout(operation), signal, onProgress)
-        : await this.engine.execute(profile, arguments_, timeoutMs ?? operationTimeout(operation), undefined, onProgress);
+        : await this.engine.execute(profile, arguments_, timeoutMs ?? operationTimeout(operation), undefined, onProgress));
     } catch (error) {
       if (signal?.aborted) {
         throw new IdriveError("cancelled", `IDrive ${operation} was cancelled`, operation, false, { cause: error });
@@ -826,7 +957,7 @@ export class CloudDriveClient {
 
   private async runParsedReport<T>(
     operation: string,
-    options: OperationOptions,
+    options: ReadOperationOptions,
     parse: (report: string) => T,
     build: (profile: StoredProfile, reportFile: string, errorFile: string) => string[],
     includeStdout = false,
@@ -852,7 +983,7 @@ export class CloudDriveClient {
 
   private async runReportMutation(
     operation: string,
-    options: OperationOptions,
+    options: MutationOperationOptions,
     build: (profile: StoredProfile, reportFile: string, errorFile: string) => string[],
   ): Promise<void> {
     validateOperationOptions(options);
@@ -870,7 +1001,7 @@ export class CloudDriveClient {
   private async runFileListMutation(
     operation: string,
     remotePaths: readonly string[],
-    options: OperationOptions,
+    options: MutationOperationOptions,
     build: (profile: StoredProfile, fileList: string, reportFile: string, errorFile: string) => string[],
   ): Promise<void> {
     await this.runFileListReport(operation, remotePaths, options, () => undefined, build);
@@ -879,7 +1010,7 @@ export class CloudDriveClient {
   private async runFileListReport<T>(
     operation: string,
     remotePaths: readonly string[],
-    options: OperationOptions,
+    options: ReadOperationOptions | MutationOperationOptions,
     parse: (report: string) => T,
     build: (profile: StoredProfile, fileList: string, reportFile: string, errorFile: string) => string[],
     retryableRead = false,
@@ -906,7 +1037,7 @@ export class CloudDriveClient {
 
   private async runReadWithRetry<T>(
     operation: string,
-    options: OperationOptions,
+    options: ReadOperationOptions,
     attempt: () => Promise<T>,
   ): Promise<T> {
     let lastError: unknown;
@@ -1002,7 +1133,7 @@ function normalizeRequiredPaths(values: readonly string[], label: string): strin
   return values.map((value) => requiredRemotePath(value, label));
 }
 
-function validateOperationOptions(options: OperationOptions): void {
+function validateOperationOptions(options: InternalOperationOptions): void {
   if (options.retries !== undefined
     && (!Number.isSafeInteger(options.retries) || options.retries < 1 || options.retries > 10)) {
     throw new IdriveError("usage", "retries must be an integer between 1 and 10");
@@ -1028,6 +1159,15 @@ function maxDecimalCursor(left: string, right: string): string {
     return normalizedLeft.length > normalizedRight.length ? left : right;
   }
   return normalizedLeft.localeCompare(normalizedRight) >= 0 ? left : right;
+}
+
+function chunkForWorkers<T>(values: readonly T[], workers: number): T[][] {
+  const chunkSize = Math.ceil(values.length / workers);
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
 }
 
 function hasEngineError(report: string): boolean {

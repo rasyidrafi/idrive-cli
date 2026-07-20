@@ -73,9 +73,14 @@ describe("CloudDriveClient login", () => {
       linkMachine: false,
     });
 
-    expect(result).toEqual(savedProfile);
+    expect(result).toEqual({
+      email: "person@example.test",
+      encryptionType: "DEFAULT",
+      server: "server",
+    });
     expect(JSON.stringify(savedProfile)).not.toContain("account-password");
-    expect(result.encodedPassword).toBe("encoded:raw-sync-password");
+    expect(result).not.toHaveProperty("encodedPassword");
+    expect(result).not.toHaveProperty("encodedPrivateKey");
     expect(linkMachine).not.toHaveBeenCalled();
   });
 
@@ -255,6 +260,87 @@ describe("CloudDriveClient login", () => {
       .rejects.toThrow("temporary link failure");
     expect(saved).toHaveLength(0);
     expect(clear).not.toHaveBeenCalled();
+  });
+
+  it("serializes credential encoding by default", async () => {
+    const firstEncoding = deferred<void>();
+    let active = 0;
+    let maximumActive = 0;
+    const encodeSecret = vi.fn(async (value: string) => {
+      active++;
+      maximumActive = Math.max(maximumActive, active);
+      if (encodeSecret.mock.calls.length === 1) await firstEncoding.promise;
+      active--;
+      return `encoded:${value}`;
+    });
+    const client = new CloudDriveClient(
+      defaultEncryptionAuth(),
+      profileStore(storedProfile()),
+      { encodeSecret, execute: vi.fn(), isInstalled: vi.fn().mockResolvedValue(true) },
+      await locations(),
+    );
+
+    const login = client.login("person@example.test", "password", { linkMachine: false });
+    await vi.waitFor(() => expect(encodeSecret).toHaveBeenCalledOnce());
+    expect(maximumActive).toBe(1);
+    firstEncoding.resolve();
+
+    await expect(login).resolves.toMatchObject({ email: "person@example.test" });
+    expect(encodeSecret).toHaveBeenCalledTimes(2);
+    expect(maximumActive).toBe(1);
+  });
+
+  it("allows configured parallel credential encoding", async () => {
+    const releaseEncoding = deferred<void>();
+    let active = 0;
+    let maximumActive = 0;
+    const encodeSecret = vi.fn(async (value: string) => {
+      active++;
+      maximumActive = Math.max(maximumActive, active);
+      await releaseEncoding.promise;
+      active--;
+      return `encoded:${value}`;
+    });
+    const client = new CloudDriveClient(
+      defaultEncryptionAuth(),
+      profileStore(storedProfile()),
+      { encodeSecret, execute: vi.fn(), isInstalled: vi.fn().mockResolvedValue(true) },
+      await locations(),
+      2,
+    );
+
+    const login = client.login("person@example.test", "password", { linkMachine: false });
+    await vi.waitFor(() => expect(encodeSecret).toHaveBeenCalledTimes(2));
+    expect(maximumActive).toBe(2);
+    releaseEncoding.resolve();
+
+    await expect(login).resolves.toMatchObject({ email: "person@example.test" });
+  });
+
+  it("cancels credential encoding while it is queued", async () => {
+    const firstEncoding = deferred<void>();
+    const encodeSecret = vi.fn(async (value: string) => {
+      await firstEncoding.promise;
+      return `encoded:${value}`;
+    });
+    const controller = new AbortController();
+    const client = new CloudDriveClient(
+      defaultEncryptionAuth(),
+      profileStore(storedProfile()),
+      { encodeSecret, execute: vi.fn(), isInstalled: vi.fn().mockResolvedValue(true) },
+      await locations(),
+    );
+
+    const login = client.login("person@example.test", "password", {
+      linkMachine: false,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(encodeSecret).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(login).rejects.toMatchObject({ code: "cancelled", operation: "login" });
+    expect(encodeSecret).toHaveBeenCalledOnce();
+    firstEncoding.resolve();
   });
 });
 
@@ -487,6 +573,71 @@ describe("CloudDriveClient file operations", () => {
     expect(downloaded).toHaveLength(2);
   });
 
+  it("uploads and downloads complete directory trees through first-class SDK methods", async () => {
+    const appLocations = await locations();
+    const localRoot = path.join(appLocations.dataDirectory, "directory-source");
+    await mkdir(path.join(localRoot, "nested/empty"), { recursive: true });
+    await writeFile(path.join(localRoot, "one.txt"), "one");
+    await writeFile(path.join(localRoot, "nested/two.txt"), "two");
+    const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
+      const report = arguments_.find((argument) => argument.startsWith("--o="))?.slice(4);
+      const remote = arguments_.at(-1) ?? "";
+      if (arguments_.includes("--auth-list") && report) {
+        await writeFile(report, remote.endsWith("home/Remote")
+          ? '<item restype="F" fname="one.txt" size="3"/><item restype="D" fname="nested" size="0"/>'
+          : remote.endsWith("home/Remote/nested")
+            ? '<item restype="F" fname="two.txt" size="3"/><item restype="D" fname="empty" size="0"/>'
+            : '<tree message="SUCCESS"/>');
+      }
+      if (arguments_.includes("--add-progress")) {
+        const fileList = arguments_.find((argument) => argument.startsWith("--files-from="))?.slice("--files-from=".length);
+        const destination = arguments_.at(-1);
+        if (fileList && destination) {
+          for (const remoteFile of (await readFile(fileList, "utf8")).trim().split("\n").filter(Boolean)) {
+            const target = path.join(destination, remoteFile.replace(/^\//, ""));
+            await mkdir(path.dirname(target), { recursive: true });
+            await writeFile(target, "downloaded");
+          }
+        }
+      }
+      return { code: 0, stderr: "", stdout: "" };
+    });
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
+
+    await client.uploadDirectory(localRoot, "/Remote");
+    const destination = path.join(appLocations.dataDirectory, "directory-download");
+    const downloaded = await client.downloadDirectory("/Remote", destination, { transfers: 2 });
+
+    expect(downloaded).toEqual([
+      path.join(destination, "Remote/nested/two.txt"),
+      path.join(destination, "Remote/one.txt"),
+    ]);
+    await expect(stat(path.join(destination, "Remote/nested/empty"))).resolves.toMatchObject({});
+    const commands = execute.mock.calls.map((call) => call[1]);
+    expect(commands.filter((command) => command.includes("--add-progress"))).toHaveLength(2);
+    expect(commands.some((command) => command.some((argument) => argument.startsWith("--create-dir=")))).toBe(true);
+  });
+
+  it("rejects a symbolic link used as the upload-directory root", async () => {
+    const appLocations = await locations();
+    const actualRoot = path.join(appLocations.dataDirectory, "actual-directory");
+    const linkedRoot = path.join(appLocations.dataDirectory, "linked-directory");
+    await mkdir(actualRoot);
+    await writeFile(path.join(actualRoot, "outside.txt"), "outside");
+    await symlink(actualRoot, linkedRoot);
+    const execute = vi.fn();
+    const client = new CloudDriveClient(
+      unusedAuth(),
+      profileStore(storedProfile()),
+      transferEngine(execute),
+      appLocations,
+    );
+
+    await expect(client.uploadDirectory(linkedRoot, "/Remote"))
+      .rejects.toMatchObject({ code: "local-io", operation: "upload directory" });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it("provides stat and deterministic recursive listings", async () => {
     const appLocations = await locations();
     const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
@@ -663,7 +814,16 @@ describe("CloudDriveClient file operations", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("executes read-only item status even when global dry-run is enabled", async () => {
+  it("uses stable SDK errors for public validation and local I/O failures", async () => {
+    const appLocations = await locations();
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(vi.fn()), appLocations);
+
+    await expect(client.login("", "password")).rejects.toMatchObject({ code: "usage", operation: "login" });
+    await expect(client.upload(path.join(appLocations.dataDirectory, "missing.txt")))
+      .rejects.toMatchObject({ code: "local-io", operation: "upload" });
+  });
+
+  it("executes read-only item status independently of mutation options", async () => {
     const appLocations = await locations();
     const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
       const report = arguments_.find((argument) => argument.startsWith("--o="))?.slice(4);
@@ -672,7 +832,7 @@ describe("CloudDriveClient file operations", () => {
     });
     const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
 
-    await expect(client.itemsStatus(["/exists.txt"], { dryRun: true })).resolves.toEqual([
+    await expect(client.itemsStatus(["/exists.txt"])).resolves.toEqual([
       { exists: true, path: "exists.txt", type: "file" },
     ]);
     expect(execute).toHaveBeenCalledOnce();
@@ -855,6 +1015,40 @@ function unusedAuth(): AuthTransport {
     authenticate: vi.fn(),
     linkMachine: vi.fn(),
   };
+}
+
+function defaultEncryptionAuth(): AuthTransport {
+  return {
+    authenticate: vi.fn().mockResolvedValue({
+      account: {
+        encryptionType: "DEFAULT",
+        syncPassword: "sync-password",
+        syncUsername: "sync-user",
+      },
+      server: {
+        accountType: "sync",
+        dedup: false,
+        encryptionType: "DEFAULT",
+        serverDns: "server.example.test",
+        webServerDns: "web.example.test",
+      },
+    }),
+    linkMachine: vi.fn(),
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  reject: (reason?: unknown) => void;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
 }
 
 function transferEngine(
