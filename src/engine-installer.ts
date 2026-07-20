@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants as fsConstants } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import {
   chmod,
   copyFile,
@@ -8,7 +10,8 @@ import {
   readFile,
   rename,
   rm,
-  stat,
+  lstat,
+  open,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -21,6 +24,7 @@ import {
   embeddedPayload,
   engineArchiveForArchitecture,
 } from "./setup-extractor.js";
+import { withFileLock } from "./file-lock.js";
 
 const engineNames = ["idevsutil_sync", "idevsutil_dedup_sync"] as const;
 
@@ -40,19 +44,33 @@ export class EngineInstaller {
     private readonly locations: AppLocations,
   ) {}
 
-  public async installFromDeb(debPath: string): Promise<EngineManifest> {
+  public async installFromDeb(debPath: string, signal?: AbortSignal): Promise<EngineManifest> {
+    return await withFileLock(
+      `${this.locations.manifestFile}.lock`,
+      async () => await this.installUnlocked(debPath, signal),
+      { ...(signal ? { signal } : {}), staleMs: 24 * 60 * 60 * 1000, timeoutMs: 2 * 60 * 1000 },
+    );
+  }
+
+  private async installUnlocked(debPath: string, signal?: AbortSignal): Promise<EngineManifest> {
     const sourcePackage = path.resolve(debPath);
-    const packageStat = await stat(sourcePackage);
-    if (!packageStat.isFile()) {
+    const packageStat = await lstat(sourcePackage);
+    if (packageStat.isSymbolicLink() || !packageStat.isFile()) {
       throw new Error(`Not a file: ${sourcePackage}`);
     }
-    const previousEngineDirectory = await this.currentEngineDirectory();
-
+    if (packageStat.size > 2 * 1024 * 1024 * 1024) {
+      throw new Error("IDrive package exceeds the 2 GiB size limit");
+    }
     const workspace = await mkdtemp(path.join(os.tmpdir(), "idrive-cli-setup-"));
     try {
+      const packageSnapshot = path.join(workspace, "IDriveForLinux.deb");
+      await snapshotPackage(sourcePackage, packageSnapshot, packageStat, signal);
+      const sourceSha256 = await hashFile(packageSnapshot, signal);
       const debDirectory = path.join(workspace, "deb");
       await mkdir(debDirectory, { recursive: true });
-      await runChecked(this.runner, "dpkg-deb", ["-x", sourcePackage, debDirectory]);
+      const debListing = await runInstallerCommand(this.runner, "dpkg-deb", ["-c", packageSnapshot], signal);
+      validateArchiveTypes(debListing.stdout);
+      await runInstallerCommand(this.runner, "dpkg-deb", ["-x", packageSnapshot, debDirectory], signal);
 
       const wrapperPath = path.join(
         debDirectory,
@@ -63,13 +81,17 @@ export class EngineInstaller {
         "IdriveForLinux",
         "idriveforlinux.bin",
       );
+      const wrapperStat = await lstat(wrapperPath);
+      if (wrapperStat.isSymbolicLink() || !wrapperStat.isFile() || wrapperStat.size > 512 * 1024 * 1024) {
+        throw new Error("IDrive package contains an invalid or oversized wrapper");
+      }
       const wrapper = await readFile(wrapperPath);
       const payloadArchive = path.join(workspace, "payload.tar.gz");
       await writeFile(payloadArchive, embeddedPayload(wrapper), { mode: 0o600 });
 
       const payloadDirectory = path.join(workspace, "payload");
       await mkdir(payloadDirectory);
-      await this.extractTrustedArchive(payloadArchive, payloadDirectory);
+      await this.extractTrustedArchive(payloadArchive, payloadDirectory, signal);
 
       const archiveName = engineArchiveForArchitecture(process.arch);
       const engineArchive = path.join(
@@ -83,7 +105,7 @@ export class EngineInstaller {
       );
       const enginePayloadDirectory = path.join(workspace, "engine");
       await mkdir(enginePayloadDirectory);
-      await this.extractTrustedArchive(engineArchive, enginePayloadDirectory);
+      await this.extractTrustedArchive(engineArchive, enginePayloadDirectory, signal);
 
       const extractedDirectory = path.join(
         enginePayloadDirectory,
@@ -91,7 +113,6 @@ export class EngineInstaller {
       );
       const packageVersion = wrapper.subarray(0, 4096).toString("utf8")
         .match(/APPVERSION="([^"]+)"/)?.[1];
-      const sourceSha256 = await hashFile(sourcePackage);
       const releasesDirectory = path.join(this.locations.dataDirectory, "releases");
       const releaseName = [
         packageVersion ?? "unknown",
@@ -132,16 +153,17 @@ export class EngineInstaller {
           sourceSha256,
           sourcePackage,
         };
+        signal?.throwIfAborted();
         await rename(stageDirectory, releaseDirectory);
         await writeFile(
           temporaryManifest,
           `${JSON.stringify(manifest, null, 2)}\n`,
           { mode: 0o600 },
         );
+        signal?.throwIfAborted();
         await rename(temporaryManifest, this.locations.manifestFile);
         committed = true;
-        await this.removePreviousEngine(previousEngineDirectory, releaseDirectory);
-        await this.removePreviousEngine(this.locations.engineDirectory, releaseDirectory);
+        // Releases are immutable. Keeping the previous one avoids racing active clients.
         return manifest;
       } finally {
         await rm(stageDirectory, { force: true, recursive: true });
@@ -158,55 +180,108 @@ export class EngineInstaller {
   private async extractTrustedArchive(
     archive: string,
     destination: string,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const listing = await runChecked(this.runner, "tar", ["-tzf", archive]);
+    const [listing, verboseListing] = await Promise.all([
+      runInstallerCommand(this.runner, "tar", ["-tzf", archive], signal),
+      runInstallerCommand(this.runner, "tar", ["-tvzf", archive], signal),
+    ]);
+    validateArchiveTypes(verboseListing.stdout);
     for (const entry of listing.stdout.split("\n").filter(Boolean)) {
       const normalized = path.posix.normalize(entry.replace(/^\.\//, ""));
       if (path.posix.isAbsolute(entry) || normalized === ".." || normalized.startsWith("../")) {
         throw new Error(`Unsafe path in IDrive archive: ${entry}`);
       }
     }
-    await runChecked(this.runner, "tar", ["-xzf", archive, "-C", destination]);
+    await runInstallerCommand(this.runner, "tar", [
+      "-xzf", archive,
+      "--no-same-owner",
+      "--no-same-permissions",
+      "-C", destination,
+    ], signal);
   }
 
-  private async currentEngineDirectory(): Promise<string | undefined> {
-    try {
-      const manifest = JSON.parse(
-        await readFile(this.locations.manifestFile, "utf8"),
-      ) as unknown;
-      if (isRecord(manifest) && typeof manifest.engineDirectory === "string") {
-        return path.resolve(this.locations.dataDirectory, manifest.engineDirectory);
-      }
-      return this.locations.engineDirectory;
-    } catch {
-      return undefined;
-    }
-  }
+}
 
-  private async removePreviousEngine(
-    previous: string | undefined,
-    active: string,
-  ): Promise<void> {
-    if (!previous || path.resolve(previous) === path.resolve(active)) {
-      return;
+async function runInstallerCommand(
+  runner: CommandRunner,
+  file: string,
+  arguments_: readonly string[],
+  signal?: AbortSignal,
+): ReturnType<typeof runChecked> {
+  return runChecked(runner, file, arguments_, signal ? { signal } : undefined);
+}
+
+export function validateArchiveTypes(listing: string): void {
+  const entries = listing.split("\n").filter(Boolean);
+  if (entries.length > 10_000) {
+    throw new Error("IDrive archive contains too many entries");
+  }
+  let totalSize = 0;
+  for (const entry of entries) {
+    const type = entry[0];
+    if (type !== "-" && type !== "d") {
+      throw new Error(`Unsafe archive entry type: ${type ?? "unknown"}`);
     }
-    const dataDirectory = path.resolve(this.locations.dataDirectory);
-    const candidate = path.resolve(previous);
-    if (!candidate.startsWith(`${dataDirectory}${path.sep}`)) {
-      return;
+    const size = entry.match(/^\S+\s+\S+\s+(\d+)\s/)?.[1];
+    if (!size) throw new Error("Unable to validate IDrive archive entry size");
+    const parsedSize = Number(size);
+    if (!Number.isSafeInteger(parsedSize) || parsedSize > 1024 * 1024 * 1024) {
+      throw new Error("IDrive archive entry exceeds the 1 GiB size limit");
     }
-    await rm(candidate, { force: true, recursive: true }).catch(() => undefined);
+    totalSize += parsedSize;
+    if (totalSize > 4 * 1024 * 1024 * 1024) {
+      throw new Error("IDrive archive exceeds the 4 GiB expanded size limit");
+    }
   }
 }
 
-async function hashFile(file: string): Promise<string> {
+async function hashFile(file: string, signal?: AbortSignal): Promise<string> {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) {
+    signal?.throwIfAborted();
     hash.update(chunk as Buffer);
   }
   return hash.digest("hex");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+async function snapshotPackage(
+  source: string,
+  destination: string,
+  expected: Awaited<ReturnType<typeof lstat>>,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const sourceHandle = await open(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const actual = await sourceHandle.stat();
+    if (!samePackageSource(actual, expected)) {
+      throw new Error("IDrive package changed before it could be snapshotted");
+    }
+    await pipeline(
+      sourceHandle.createReadStream({ autoClose: false }),
+      createWriteStream(destination, { flags: "wx", mode: 0o600 }),
+      signal ? { signal } : {},
+    );
+    const [after, destinationStat] = await Promise.all([sourceHandle.stat(), lstat(destination)]);
+    if (!samePackageSource(after, expected) || destinationStat.size !== expected.size) {
+      throw new Error("IDrive package changed while it was being snapshotted");
+    }
+    const destinationHandle = await open(destination, "r");
+    try { await destinationHandle.sync(); } finally { await destinationHandle.close(); }
+  } finally {
+    await sourceHandle.close();
+  }
+}
+
+function samePackageSource(
+  actual: Awaited<ReturnType<typeof lstat>>,
+  expected: Awaited<ReturnType<typeof lstat>>,
+): boolean {
+  return actual.isFile()
+    && actual.dev === expected.dev
+    && actual.ino === expected.ino
+    && actual.size === expected.size
+    && actual.mtimeMs === expected.mtimeMs
+    && actual.ctimeMs === expected.ctimeMs;
 }

@@ -47,6 +47,26 @@ describe("IdDriveAuthClient", () => {
     await expect(
       new IdDriveAuthClient(fetcher).authenticate("person@example.test", "secret"),
     ).rejects.toThrow(/503/);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries transient responses but not client errors", async () => {
+    const transient = vi.fn()
+      .mockResolvedValueOnce(new Response("busy", { status: 503 }))
+      .mockResolvedValueOnce(new Response(
+        '<root><login message="SUCCESS" username_sync="a" password_sync="b" enctype="DEFAULT" /></root>',
+      ))
+      .mockResolvedValueOnce(new Response(
+        '<root><login acctype="sync" evssrvr="server" evswebsrvr="web" enctype="DEFAULT" dedup="off" /></root>',
+      ));
+    await expect(new IdDriveAuthClient(transient).authenticate("email", "password"))
+      .resolves.toBeDefined();
+    expect(transient).toHaveBeenCalledTimes(3);
+
+    const clientError = vi.fn().mockResolvedValue(new Response("bad", { status: 401 }));
+    await expect(new IdDriveAuthClient(clientError).authenticate("email", "password"))
+      .rejects.toThrow(/401/);
+    expect(clientError).toHaveBeenCalledOnce();
   });
 
   it("validates successful machine-link responses", async () => {

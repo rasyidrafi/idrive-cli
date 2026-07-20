@@ -11,6 +11,8 @@ export interface RunOptions {
   env?: NodeJS.ProcessEnv;
   killGraceMs?: number;
   maxOutputBytes?: number;
+  onOutput?: (stream: "stderr" | "stdout", chunk: string) => void;
+  signal?: AbortSignal;
   timeoutMs?: number;
 }
 
@@ -37,11 +39,15 @@ export class ProcessRunner implements CommandRunner {
     arguments_: readonly string[],
     options: RunOptions = {},
   ): Promise<CommandResult> {
+    if (options.signal?.aborted) {
+      throw new Error(`${file} was aborted`);
+    }
     return await new Promise((resolve, reject) => {
       const child = spawn(file, arguments_, {
         cwd: options.cwd,
         env: options.env,
         shell: false,
+        detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });
       const maxOutputBytes = options.maxOutputBytes ?? 4 * 1024 * 1024;
@@ -54,15 +60,27 @@ export class ProcessRunner implements CommandRunner {
       let terminationError: Error | undefined;
       let killTimer: NodeJS.Timeout | undefined;
 
+      const kill = (signal: NodeJS.Signals): void => {
+        if (process.platform !== "win32" && child.pid !== undefined) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+            // Fall back when the process group has already disappeared.
+          }
+        }
+        child.kill(signal);
+      };
+
       const terminate = (error: Error): void => {
         if (terminationError || settled) {
           return;
         }
         terminationError = error;
-        child.kill("SIGTERM");
+        kill("SIGTERM");
         killTimer = setTimeout(() => {
           if (!settled) {
-            child.kill("SIGKILL");
+            kill("SIGKILL");
           }
         }, killGraceMs);
         killTimer.unref();
@@ -72,6 +90,14 @@ export class ProcessRunner implements CommandRunner {
         terminate(new Error(`${file} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timeout.unref();
+      const onAbort = (): void => terminate(new Error(`${file} was aborted`));
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        options.signal?.removeEventListener("abort", onAbort);
+      };
 
       const append = (target: "stderr" | "stdout", chunk: Buffer): void => {
         outputBytes += chunk.length;
@@ -79,10 +105,12 @@ export class ProcessRunner implements CommandRunner {
           terminate(new Error(`${file} exceeded the output limit`));
           return;
         }
+        const text = chunk.toString("utf8");
+        options.onOutput?.(target, text);
         if (target === "stdout") {
-          stdout += chunk.toString("utf8");
+          stdout += text;
         } else {
-          stderr += chunk.toString("utf8");
+          stderr += text;
         }
       };
 
@@ -91,16 +119,14 @@ export class ProcessRunner implements CommandRunner {
       child.on("error", (error) => {
         if (!settled) {
           settled = true;
-          clearTimeout(timeout);
-          if (killTimer) clearTimeout(killTimer);
+          cleanup();
           reject(error);
         }
       });
       child.on("close", (code) => {
         if (!settled) {
           settled = true;
-          clearTimeout(timeout);
-          if (killTimer) clearTimeout(killTimer);
+          cleanup();
           if (terminationError) {
             reject(terminationError);
           } else {

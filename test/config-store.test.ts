@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -47,5 +47,39 @@ describe("ConfigStore", () => {
     temporaryDirectories.push(directory);
     await expect(new ConfigStore(path.join(directory, "missing.json")).load())
       .resolves.toBeNull();
+  });
+
+  it("rejects symlinked and overly permissive profiles", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "idrive-cli-config-"));
+    temporaryDirectories.push(directory);
+    const target = path.join(directory, "target.json");
+    const file = path.join(directory, "config.json");
+    await writeFile(target, "{}", { mode: 0o600 });
+    await symlink(target, file);
+    await expect(new ConfigStore(file).load()).rejects.toThrow(/unsafe/i);
+    await import("node:fs/promises").then(({ rm }) => rm(file));
+    await writeFile(file, "{}", { mode: 0o644 });
+    await chmod(file, 0o644);
+    await expect(new ConfigStore(file).load()).rejects.toThrow(/permissions/i);
+  });
+
+  it("serializes concurrent saves without leaving temporary files", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "idrive-cli-config-"));
+    temporaryDirectories.push(directory);
+    const file = path.join(directory, "config.json");
+    const store = new ConfigStore(file);
+    const profiles = Array.from({ length: 20 }, (_, index): StoredProfile => ({
+      dedup: false,
+      email: `person-${index}@example.test`,
+      encodedPassword: "password",
+      encodedPrivateKey: "key",
+      encryptionType: "DEFAULT",
+      server: "server",
+      syncUsername: `user-${index}`,
+    }));
+    await Promise.all(profiles.map((profile) => store.save(profile)));
+    expect(profiles).toContainEqual(await store.load());
+    const names = await import("node:fs/promises").then(({ readdir }) => readdir(directory));
+    expect(names).toEqual(["config.json"]);
   });
 });

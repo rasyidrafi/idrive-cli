@@ -43,6 +43,12 @@ install the IDrive desktop application.
 | `idrive-cli rm REMOTE_PATH --yes` | Move a path to trash |
 | `idrive-cli purge REMOTE_PATH --yes` | Permanently delete a path from trash |
 | `idrive-cli quota` | Show storage usage |
+| `idrive-cli stat REMOTE_PATH [--json]` | Show metadata for one path |
+| `idrive-cli ls REMOTE_PATH --recursive` | Recursively list a directory tree |
+| `idrive-cli upload-dir LOCAL_DIR [REMOTE_DIR]` | Upload a directory tree in batches |
+| `idrive-cli download-dir REMOTE_DIR [DEST]` | Download a directory tree in batches |
+| `idrive-cli doctor [--online]` | Validate local state and optionally quota access |
+| `idrive-cli cleanup` | Remove stale private transfer workspaces |
 | `idrive-cli logout` | Remove the local profile |
 
 Example:
@@ -54,13 +60,37 @@ idrive-cli ls /Videos
 idrive-cli download /Videos/movie.mp4 ./downloads
 ```
 
+Global options include:
+
+- `--dry-run` previews mutations without confirmation; read-only discovery may
+  still require a configured account.
+- `--json` emits versioned success/error envelopes for automation.
+- `--quiet` suppresses human-readable output except errors.
+- `--progress` reports observed engine percentages on stderr.
+- `--retries N` controls retries for safe read operations (default `3`).
+- `--timeout-seconds N` overrides the engine operation timeout.
+- `--temp-dir PATH` places private workspaces below `PATH/idrive-cli` without
+  changing the parent directory's permissions.
+- `--transfers N` controls concurrent download batches (`1` to `16`). Uploads
+  remain one engine batch so all local snapshots finish before remote mutation.
+
+Progress and errors are never written to JSON stdout. Uploads use one engine
+batch after all local snapshots pass validation. Recursive downloads can split
+files across concurrent private staging batches when `--transfers` is greater
+than one; concurrent proprietary-engine execution should be enabled gradually
+and validated against the account. The selected remote directory is
+materialized below the destination.
+
 ## Security
 
 - The original account password and private encryption key are not saved.
 - Encoded transfer credentials are stored with mode `0600`.
 - Engine binaries are verified against hashes recorded during setup.
+- Engine hashes are rechecked before every invocation.
+- Package archives reject links, special files, traversal, and oversized input.
 - Downloads use private staging and are published with mode `0600`.
-- `rm` and `purge` require `--yes` and refuse the Cloud Drive root.
+- `rm` and `purge` require `--yes` for execution and always refuse the Cloud
+  Drive root; dry-run previews do not require confirmation.
 - SSO-only accounts must create an IDrive account password before login.
 
 ## Local Data
@@ -102,6 +132,10 @@ The live suite uses a unique remote directory and removes it after testing.
 - Only Linux x86_64 is supported.
 - Cloud Drive must already be activated.
 - No continuous sync daemon, streaming server, or HTTP API is included.
+- Transfers are file based; there is no streaming or byte-range interface.
+- Paths whose segments end in whitespace are rejected because the proprietary
+  engine trims `--files-from` lines and cannot address them reliably.
+- A batch may complete remotely before a local interruption is reported.
 - Default-encryption, non-dedup, and other regional accounts need more testing.
 
 The proprietary transfer engine remains owned and licensed by IDrive and is

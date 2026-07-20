@@ -25,6 +25,11 @@ describe("normalizeRemotePath", () => {
       expect(() => normalizeRemotePath(value)).toThrow(/unsafe/i);
     },
   );
+
+  it("rejects segments ending in whitespace while preserving leading spaces", () => {
+    expect(normalizeRemotePath("/ leading-space.txt")).toBe(" leading-space.txt");
+    expect(() => normalizeRemotePath("/trailing-space.txt ")).toThrow(/ending in whitespace/i);
+  });
 });
 
 describe("splitRemoteFilePath", () => {

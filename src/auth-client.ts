@@ -3,6 +3,7 @@ import {
   parseSyncServerDetails,
 } from "./auth-parser.js";
 import type { AccountDetails, SyncServerDetails } from "./types.js";
+import { responseTextLimited } from "./bounded-input.js";
 
 const accountDetailsUrl = "https://www1.idrive.com/cgi-bin/v1/user-details.cgi";
 const syncServerUrl =
@@ -25,12 +26,13 @@ export class IdDriveAuthClient {
   public async authenticate(
     email: string,
     password: string,
+    signal?: AbortSignal,
   ): Promise<AuthenticationResult> {
     const accountUrl = new URL(accountDetailsUrl);
     accountUrl.searchParams.set("username", email);
     accountUrl.searchParams.set("password", password);
 
-    const accountXml = await this.getText(accountUrl);
+    const accountXml = await this.getText(accountUrl, signal);
     const account = parseAccountDetails(accountXml);
     if (!account) {
       throw new Error(
@@ -41,7 +43,7 @@ export class IdDriveAuthClient {
     const serverUrl = new URL(syncServerUrl);
     serverUrl.searchParams.set("username", account.syncUsername);
     serverUrl.searchParams.set("password", account.syncPassword);
-    const server = parseSyncServerDetails(await this.getText(serverUrl));
+    const server = parseSyncServerDetails(await this.getText(serverUrl, signal));
 
     return { account, server };
   }
@@ -51,6 +53,7 @@ export class IdDriveAuthClient {
     password: string,
     deviceId: string,
     deviceName: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     const body = new URLSearchParams({
       app_type: "S",
@@ -64,8 +67,8 @@ export class IdDriveAuthClient {
       body,
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       method: "POST",
-    });
-    const responseText = await response.text();
+    }, signal);
+    const responseText = await responseTextLimited(response, 256 * 1024);
     let data: unknown;
     try {
       data = JSON.parse(responseText) as unknown;
@@ -77,30 +80,58 @@ export class IdDriveAuthClient {
     }
   }
 
-  private async getText(url: URL): Promise<string> {
-    return await (await this.request(url)).text();
+  private async getText(url: URL, signal?: AbortSignal): Promise<string> {
+    return await responseTextLimited(await this.request(url, {}, signal), 1024 * 1024);
   }
 
   private async request(
     url: string | URL,
     init: RequestInit = {},
+    callerSignal?: AbortSignal,
   ): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-    try {
-      const response = await this.fetcher(url, {
-        ...init,
-        redirect: "error",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`IDrive request failed with HTTP ${response.status}`);
+    let lastError: unknown;
+    const maxAttempts = !init.method || init.method === "GET" ? 3 : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await this.fetcher(url, {
+          ...init,
+          redirect: "error",
+          signal: callerSignal ? AbortSignal.any([controller.signal, callerSignal]) : controller.signal,
+        });
+        if (response.ok) return response;
+        const error = new Error(`IDrive request failed with HTTP ${response.status}`);
+        if (!isRetryableStatus(response.status) || attempt === maxAttempts) throw error;
+        lastError = error;
+      } catch (error) {
+        if (callerSignal?.aborted || attempt === maxAttempts || !isRetryableNetworkError(error)) throw error;
+        lastError = error;
+      } finally {
+        clearTimeout(timeout);
       }
-      return response;
-    } finally {
-      clearTimeout(timeout);
+      await wait(100 * 2 ** (attempt - 1) + Math.floor(Math.random() * 50), callerSignal);
     }
+    throw lastError;
   }
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
+}
+
+async function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(new Error("IDrive request was aborted"));
+    }, { once: true });
+  });
 }
 
 function isSuccessfulLinkResponse(value: unknown): boolean {

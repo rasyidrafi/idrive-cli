@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -39,6 +40,11 @@ let localDirectory = "";
 let notesFile = "";
 let longFile = "";
 let longName = "";
+let batchDirectory = "";
+let batchAlpha = "";
+let batchBeta = "";
+let specialDirectory = "";
+let specialNames: string[] = [];
 let quotaBefore = 0;
 let accountVerified = false;
 let remoteCreated = false;
@@ -67,8 +73,26 @@ suite("authenticated IDrive Cloud Drive transport", () => {
     notesFile = path.join(localDirectory, "notes with spaces.txt");
     longName = `${"l".repeat(220)}.txt`;
     longFile = path.join(localDirectory, longName);
+    batchDirectory = path.join(localDirectory, "batch-source");
+    batchAlpha = path.join(batchDirectory, "alpha.txt");
+    batchBeta = path.join(batchDirectory, "nested", "beta.txt");
+    specialDirectory = path.join(localDirectory, "special-source");
+    specialNames = [
+      "zero-byte.bin",
+      "café-文件.txt",
+      'quote "and"\ttab.txt',
+      " leading-space.txt",
+      "unsupported-trailing-space.txt ",
+    ];
+    await mkdir(path.dirname(batchBeta), { recursive: true });
+    await mkdir(specialDirectory);
     await writeFile(notesFile, "IDrive live test version one\n", { mode: 0o600 });
     await writeFile(longFile, "long filename fixture\n", { mode: 0o600 });
+    await writeFile(batchAlpha, "batch alpha\n", { mode: 0o600 });
+    await writeFile(batchBeta, "batch beta\n", { mode: 0o600 });
+    for (const [index, name] of specialNames.entries()) {
+      await writeFile(path.join(specialDirectory, name), index === 0 ? "" : `special ${index}\n`, { mode: 0o600 });
+    }
     process.stdout.write(`\nLive remote directory: /${remoteDirectory}\n`);
   });
 
@@ -88,7 +112,25 @@ suite("authenticated IDrive Cloud Drive transport", () => {
         }
       }
       if (accountVerified && remoteCreated) {
-        await client.remove(remoteDirectory);
+        let removeError: unknown;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await client.remove(remoteDirectory);
+            removeError = undefined;
+            break;
+          } catch (error) {
+            removeError = error;
+            const rootEntries = await client.list("/");
+            if (!rootEntries.some((entry) => entry.name === remoteDirectory)) {
+              removeError = undefined;
+              break;
+            }
+            await delay(500 * (attempt + 1));
+          }
+        }
+        if (removeError) {
+          throw removeError instanceof Error ? removeError : new Error("Live removal failed with a non-Error value");
+        }
         let purgeError: unknown;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
@@ -135,7 +177,7 @@ suite("authenticated IDrive Cloud Drive transport", () => {
     expect(status.engineInstalled).toBe(true);
     expect(status.loggedIn).toBe(true);
     expect(status.email).toBe(expectedEmail);
-    const quota = await client.quota();
+    const quota = await quotaEventually();
     expect(quota.total).toBeGreaterThan(0);
     quotaBefore = quota.used;
   });
@@ -170,6 +212,73 @@ suite("authenticated IDrive Cloud Drive transport", () => {
       }),
     ]));
   });
+
+  it("supports stat, recursive listings, and empty directories", async () => {
+    const emptyDirectory = `${remoteDirectory}/Empty Folder`;
+    await client.createDirectory(emptyDirectory);
+    await expect(client.stat(`${remoteDirectory}/${path.basename(notesFile)}`))
+      .resolves.toMatchObject({ name: path.basename(notesFile), type: "file" });
+    await expect(client.stat(`${remoteDirectory}/missing-stat.txt`)).resolves.toBeNull();
+    const recursive = await client.listRecursive(remoteDirectory);
+    expect(recursive).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: emptyDirectory, type: "directory" }),
+      expect.objectContaining({ path: nestedDirectory, type: "directory" }),
+    ]));
+    await expect(client.list(emptyDirectory)).resolves.toEqual([]);
+  });
+
+  it("round-trips batch uploads and downloads", async () => {
+    await client.uploadBatch(batchDirectory, ["alpha.txt", "nested/beta.txt"], remoteDirectory);
+    const nestedBatch = await client.list(`${remoteDirectory}/nested`);
+    expect(nestedBatch).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "beta.txt", type: "file" }),
+    ]));
+    const destination = path.join(localDirectory, "batch-download");
+    const downloaded = await client.downloadBatch([
+      `${remoteDirectory}/alpha.txt`,
+      `${remoteDirectory}/nested/beta.txt`,
+    ], destination);
+    expect(downloaded).toHaveLength(2);
+    expect(await sha256(downloaded[0] ?? "")).toBe(await sha256(batchAlpha));
+    expect(await sha256(downloaded[1] ?? "")).toBe(await sha256(batchBeta));
+  }, 3 * 60_000);
+
+  it("supports concurrent download batches and dry-run without mutation", async () => {
+    const destination = path.join(localDirectory, "concurrent-download");
+    const [alpha, beta] = await Promise.all([
+      client.downloadBatch([`${remoteDirectory}/alpha.txt`], destination),
+      client.downloadBatch([`${remoteDirectory}/nested/beta.txt`], destination),
+    ]);
+    expect(await sha256(alpha[0] ?? "")).toBe(await sha256(batchAlpha));
+    expect(await sha256(beta[0] ?? "")).toBe(await sha256(batchBeta));
+
+    const dryDirectory = `${remoteDirectory}/Dry Run Must Not Exist`;
+    await client.createDirectory(dryDirectory, { dryRun: true });
+    await client.uploadBatch(batchDirectory, ["alpha.txt"], dryDirectory, { dryRun: true });
+    expect(await client.stat(dryDirectory)).toBeNull();
+  }, 3 * 60_000);
+
+  it("preserves zero-byte, Unicode, quotes, tabs, and edge spaces", async () => {
+    const supportedNames = specialNames.filter((name) => !/\s$/.test(name));
+    await expect(client.uploadBatch(
+      specialDirectory,
+      ["unsupported-trailing-space.txt "],
+      remoteDirectory,
+    )).rejects.toThrow(/ending in whitespace/i);
+    await client.uploadBatch(specialDirectory, supportedNames, remoteDirectory);
+    const listed = await client.list(remoteDirectory);
+    for (const name of supportedNames) {
+      expect(listed.some((entry) => entry.name === name)).toBe(true);
+    }
+    const destination = path.join(localDirectory, "special-download");
+    const downloaded = await client.downloadBatch(
+      supportedNames.map((name) => `${remoteDirectory}/${name}`),
+      destination,
+    );
+    for (const [index, file] of downloaded.entries()) {
+      expect(await sha256(file)).toBe(await sha256(path.join(specialDirectory, supportedNames[index] ?? "")));
+    }
+  }, 3 * 60_000);
 
   it("downloads files with matching checksums and private modes", async () => {
     const downloadRoot = path.join(localDirectory, "downloads");
@@ -240,4 +349,20 @@ async function sha256(file: string): Promise<string> {
 
 async function delay(milliseconds: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function quotaEventually(): Promise<{ total: number; used: number }> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await client.quota();
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof Error) || !/Unable to retrieve the quota\. Try again\./i.test(error.message)) {
+        throw error;
+      }
+      await delay(2_000 * (attempt + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("IDrive quota remained unavailable");
 }

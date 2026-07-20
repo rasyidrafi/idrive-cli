@@ -174,7 +174,7 @@ describe("CloudDriveClient login", () => {
     expect(linkMachine).not.toHaveBeenCalled();
   });
 
-  it("rolls back the local profile when remote device linking fails", async () => {
+  it("does not mutate the local profile when remote device linking fails", async () => {
     const linkMachine = vi.fn().mockRejectedValue(new Error("link failed"));
     const auth: AuthTransport = {
       authenticate: vi.fn().mockResolvedValue({
@@ -209,15 +209,12 @@ describe("CloudDriveClient login", () => {
 
     await expect(client.login("person@example.test", "password"))
       .rejects.toThrow("link failed");
-    expect(save).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
     expect(linkMachine).toHaveBeenCalledOnce();
-    expect(clear).toHaveBeenCalledOnce();
-    expect(save.mock.invocationCallOrder[0]).toBeLessThan(
-      linkMachine.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
-    );
+    expect(clear).not.toHaveBeenCalled();
   });
 
-  it("restores an existing profile when re-login linking fails", async () => {
+  it("leaves an existing profile untouched when re-login linking fails", async () => {
     const previous = storedProfile();
     const saved: StoredProfile[] = [];
     const clear = vi.fn();
@@ -255,8 +252,7 @@ describe("CloudDriveClient login", () => {
 
     await expect(client.login("new@example.test", "password"))
       .rejects.toThrow("temporary link failure");
-    expect(saved).toHaveLength(2);
-    expect(saved.at(-1)).toEqual(previous);
+    expect(saved).toHaveLength(0);
     expect(clear).not.toHaveBeenCalled();
   });
 });
@@ -401,6 +397,35 @@ describe("CloudDriveClient file operations", () => {
     expect(execute).toHaveBeenCalledTimes(2);
   });
 
+  it("retries transient list reports but not malformed reports", async () => {
+    const appLocations = await locations();
+    let attempt = 0;
+    const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
+      attempt++;
+      const reportFile = arguments_.find((argument) => argument.startsWith("--o="))?.slice(4);
+      if (reportFile) {
+        await writeFile(reportFile, attempt === 1
+          ? "<tree desc='temporarily unavailable' message='ERROR'/>"
+          : '<item restype="F" fname="ready.txt" size="1"/>');
+      }
+      return { code: 0, stderr: "", stdout: "" };
+    });
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
+    await expect(client.list("/Retry")).resolves.toEqual([
+      { name: "ready.txt", size: 1, type: "file" },
+    ]);
+    expect(execute).toHaveBeenCalledTimes(2);
+
+    const malformed = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
+      const reportFile = arguments_.find((argument) => argument.startsWith("--o="))?.slice(4);
+      if (reportFile) await writeFile(reportFile, "<garbage/>");
+      return { code: 0, stderr: "", stdout: "" };
+    });
+    const malformedClient = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(malformed), appLocations);
+    await expect(malformedClient.list("/Malformed")).rejects.toThrow(/invalid/i);
+    expect(malformed).toHaveBeenCalledOnce();
+  });
+
   it("rejects symlinks in the destination hierarchy", async () => {
     const appLocations = await locations();
     const outside = await mkdtemp(path.join(tmpdir(), "idrive-outside-test-"));
@@ -431,6 +456,80 @@ describe("CloudDriveClient file operations", () => {
     await expect(client.download("/Unsafe/movie.mp4", appLocations.dataDirectory))
       .rejects.toThrow(/unsafe download destination component/i);
     expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("uses one engine invocation for batch uploads and downloads", async () => {
+    const appLocations = await locations();
+    const localRoot = path.join(appLocations.dataDirectory, "batch-source");
+    await mkdir(path.join(localRoot, "nested"), { recursive: true });
+    await writeFile(path.join(localRoot, "one.txt"), "one");
+    await writeFile(path.join(localRoot, "nested/two.txt"), "two");
+    const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
+      if (!arguments_.includes("--add-progress")) return { code: 0, stderr: "", stdout: "" };
+      const fileList = arguments_.find((argument) => argument.startsWith("--files-from="))?.slice("--files-from=".length);
+      const destination = arguments_.at(-1);
+      if (fileList && destination) {
+        for (const remoteFile of (await readFile(fileList, "utf8")).trim().split("\n")) {
+          const target = path.join(destination, remoteFile.replace(/^\//, ""));
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, remoteFile);
+        }
+      }
+      return { code: 0, stderr: "", stdout: "" };
+    });
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
+
+    await client.uploadBatch(localRoot, ["one.txt", "nested/two.txt"], "/Batch");
+    const downloaded = await client.downloadBatch(["Batch/one.txt", "Batch/nested/two.txt"], path.join(appLocations.dataDirectory, "batch-download"));
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(downloaded).toHaveLength(2);
+  });
+
+  it("provides stat and deterministic recursive listings", async () => {
+    const appLocations = await locations();
+    const execute = vi.fn(async (_profile: StoredProfile, arguments_: readonly string[]) => {
+      const report = arguments_.find((argument) => argument.startsWith("--o="))?.slice(4);
+      const remote = arguments_.at(-1) ?? "";
+      if (report) {
+        await writeFile(report, remote.endsWith("home/Root")
+          ? '<item restype="F" fname="z.txt" size="1"/><item restype="D" fname="A" size="0"/>'
+          : remote.endsWith("home/Root/A")
+            ? '<item restype="F" fname="b.txt" size="2"/>'
+            : "");
+      }
+      return { code: 0, stderr: "", stdout: "" };
+    });
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
+
+    await expect(client.stat("Root/z.txt")).resolves.toMatchObject({ name: "z.txt", type: "file" });
+    await expect(client.stat("Root/missing")).resolves.toBeNull();
+    await expect(client.listRecursive("Root")).resolves.toEqual([
+      { name: "A", path: "Root/A", size: 0, type: "directory" },
+      { name: "b.txt", path: "Root/A/b.txt", size: 2, type: "file" },
+      { name: "z.txt", path: "Root/z.txt", size: 1, type: "file" },
+    ]);
+  });
+
+  it("cancels before staging or invoking the engine", async () => {
+    const appLocations = await locations();
+    const source = path.join(appLocations.dataDirectory, "cancel.txt");
+    await writeFile(source, "cancel me");
+    const execute = vi.fn();
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(execute), appLocations);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(client.upload(source, "/", { signal: controller.signal }))
+      .rejects.toThrow(/abort/i);
+    expect(execute).not.toHaveBeenCalled();
+    expect(await readdir(appLocations.temporaryDirectory)).toEqual([]);
+  });
+
+  it("validates empty batch destinations during dry-run", async () => {
+    const appLocations = await locations();
+    const client = new CloudDriveClient(unusedAuth(), profileStore(storedProfile()), transferEngine(vi.fn()), appLocations);
+    await expect(client.uploadBatch(appLocations.dataDirectory, [], "../unsafe", { dryRun: true }))
+      .rejects.toThrow(/relative path/i);
   });
 });
 

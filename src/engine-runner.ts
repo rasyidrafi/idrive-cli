@@ -1,24 +1,22 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { selectEngineName } from "./engine-commands.js";
 import type { AppLocations } from "./locations.js";
 import type { CommandResult, CommandRunner } from "./process-runner.js";
 import type { StoredProfile } from "./types.js";
+import { ensurePrivateDirectory } from "./secure-directory.js";
 
 export class EngineRunner {
-  private integrityVerified = false;
-  private activeEngineDirectory: string | undefined;
-
   public constructor(
     private readonly runner: CommandRunner,
     private readonly locations: AppLocations,
   ) {}
 
-  public enginePath(dedup: boolean): string {
+  private enginePath(dedup: boolean, directory: string): string {
     return path.join(
-      this.activeEngineDirectory ?? this.locations.engineDirectory,
+      directory,
       selectEngineName(dedup),
     );
   }
@@ -32,11 +30,38 @@ export class EngineRunner {
     }
   }
 
-  public async encodeSecret(value: string): Promise<string> {
-    await this.verifyIntegrity();
-    const result = await this.runUtf8(this.enginePath(false), [
+  public async diagnose(): Promise<{
+    architecture?: string;
+    hashes?: Record<string, string>;
+    installed: boolean;
+    message: string;
+    packageVersion?: string;
+  }> {
+    try {
+      await this.verifyIntegrity();
+      const manifest = JSON.parse(await readFile(this.locations.manifestFile, "utf8")) as unknown;
+      const packageVersion = isRecord(manifest) && typeof manifest.packageVersion === "string" ? manifest.packageVersion : undefined;
+      const architecture = isRecord(manifest) && typeof manifest.architecture === "string" ? manifest.architecture : undefined;
+      const hashes = isRecord(manifest) && isRecord(manifest.sha256)
+        ? Object.fromEntries(Object.entries(manifest.sha256).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+        : undefined;
+      return {
+        ...(architecture ? { architecture } : {}),
+        ...(hashes ? { hashes } : {}),
+        installed: true,
+        message: "engine manifest and hashes are valid",
+        ...(packageVersion ? { packageVersion } : {}),
+      };
+    } catch (error) {
+      return { installed: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  public async encodeSecret(value: string, signal?: AbortSignal): Promise<string> {
+    const directory = await this.verifyIntegrity();
+    const result = await this.runUtf8(this.enginePath(false, directory), [
       `--string-encode=${safeArgument(value)}`,
-    ], 30_000);
+    ], 30_000, signal);
     if (result.code !== 0) {
       throw new Error(`IDrive engine could not encode a credential: ${result.stderr.trim()}`);
     }
@@ -51,12 +76,16 @@ export class EngineRunner {
     profile: StoredProfile,
     arguments_: readonly string[],
     timeoutMs = 2 * 60 * 60 * 1000,
+    signal?: AbortSignal,
+    onProgress?: (percent: number) => void,
   ): Promise<CommandResult> {
-    await this.verifyIntegrity();
+    const directory = await this.verifyIntegrity();
     return await this.runUtf8(
-      this.enginePath(profile.dedup),
+      this.enginePath(profile.dedup, directory),
       arguments_,
       timeoutMs,
+      signal,
+      onProgress,
     );
   }
 
@@ -64,16 +93,22 @@ export class EngineRunner {
     executable: string,
     arguments_: readonly string[],
     timeoutMs: number,
+    signal?: AbortSignal,
+    onProgress?: (percent: number) => void,
   ): Promise<CommandResult> {
-    await mkdir(this.locations.temporaryDirectory, { mode: 0o700, recursive: true });
+    await ensurePrivateDirectory(this.locations.temporaryDirectory);
     const workspace = await mkdtemp(
       path.join(this.locations.temporaryDirectory, "command-"),
     );
     try {
       const commandFile = path.join(workspace, "command.txt");
+      await writeFile(path.join(workspace, ".owner"), `${process.pid}\n`, { mode: 0o600 });
       const contents = arguments_.map(safeArgument).join("\n");
       await writeFile(commandFile, `${contents}\n`, { mode: 0o600 });
+      const parseProgress = onProgress ? createProgressParser(onProgress) : undefined;
       return await this.runner.run(executable, [`--utf8-cmd=${commandFile}`], {
+        ...(parseProgress ? { onOutput: (_stream: "stderr" | "stdout", chunk: string) => parseProgress(chunk) } : {}),
+        ...(signal ? { signal } : {}),
         timeoutMs,
       });
     } finally {
@@ -81,17 +116,14 @@ export class EngineRunner {
     }
   }
 
-  private async verifyIntegrity(): Promise<void> {
-    if (this.integrityVerified) {
-      return;
-    }
+  private async verifyIntegrity(): Promise<string> {
     const manifest = JSON.parse(
       await readFile(this.locations.manifestFile, "utf8"),
     ) as unknown;
     if (!isRecord(manifest) || !isRecord(manifest.sha256)) {
       throw new Error("Invalid IDrive engine manifest; run idrive-cli setup again");
     }
-    this.activeEngineDirectory = activeDirectory(manifest, this.locations);
+    const directory = activeDirectory(manifest, this.locations);
 
     for (const dedup of [false, true]) {
       const engineName = selectEngineName(dedup);
@@ -100,14 +132,30 @@ export class EngineRunner {
         throw new Error(`Missing integrity hash for ${engineName}`);
       }
       const actual = createHash("sha256")
-        .update(await readFile(this.enginePath(dedup)))
+        .update(await readFile(this.enginePath(dedup, directory)))
         .digest("hex");
       if (actual !== expected) {
         throw new Error(`Integrity check failed for ${engineName}; run setup again`);
       }
     }
-    this.integrityVerified = true;
+    return directory;
   }
+}
+
+export function createProgressParser(onProgress: (percent: number) => void): (chunk: string) => void {
+  let lastPercent = -1;
+  let tail = "";
+  return (chunk: string): void => {
+    const text = tail + chunk;
+    tail = text.slice(-4);
+    for (const match of text.matchAll(/\b(100|[1-9]?\d)%/g)) {
+      const percent = Number(match[1]);
+      if (percent > lastPercent) {
+        lastPercent = percent;
+        onProgress(percent);
+      }
+    }
+  };
 }
 
 function activeDirectory(

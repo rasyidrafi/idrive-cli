@@ -1,15 +1,19 @@
 import path from "node:path";
+import { IdriveError } from "./errors.js";
 
 const unsafeCharacters = /[\\\0\n\r]/;
 
 export function normalizeRemotePath(value: string): string {
   if (unsafeCharacters.test(value)) {
-    throw new Error("Remote path contains unsafe characters");
+    throw new IdriveError("usage", "Remote path contains unsafe characters");
   }
 
   const segments = value.split("/").filter((segment) => segment.length > 0);
   if (segments.some((segment) => segment === "." || segment === "..")) {
-    throw new Error("Remote path cannot contain relative path segments");
+    throw new IdriveError("usage", "Remote path cannot contain relative path segments");
+  }
+  if (segments.some((segment) => /\s$/.test(segment))) {
+    throw new IdriveError("usage", "Remote path segments ending in whitespace are unsupported by the IDrive engine");
   }
 
   return segments.join("/");
@@ -21,7 +25,7 @@ export function splitRemoteFilePath(value: string): {
 } {
   const normalized = normalizeRemotePath(value);
   if (normalized.length === 0) {
-    throw new Error("A remote file path is required");
+    throw new IdriveError("usage", "A remote file path is required");
   }
 
   return {

@@ -1,7 +1,10 @@
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import type { EncryptionType, StoredProfile } from "./types.js";
+import { withFileLock } from "./file-lock.js";
+import { ensurePrivateDirectory } from "./secure-directory.js";
 
 export class ConfigStore {
   public constructor(public readonly filePath: string) {}
@@ -9,6 +12,16 @@ export class ConfigStore {
   public async load(): Promise<StoredProfile | null> {
     let text: string;
     try {
+      const metadata = await lstat(this.filePath);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new Error("Unsafe IDrive Cloud Drive profile file");
+      }
+      if (process.getuid && metadata.uid !== process.getuid()) {
+        throw new Error("IDrive Cloud Drive profile is owned by another user");
+      }
+      if ((metadata.mode & 0o077) !== 0) {
+        throw new Error("IDrive Cloud Drive profile permissions are too open");
+      }
       text = await readFile(this.filePath, "utf8");
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
@@ -21,28 +34,48 @@ export class ConfigStore {
   }
 
   public async save(profile: StoredProfile): Promise<void> {
+    await withFileLock(`${this.filePath}.lock`, async () => this.saveUnlocked(profile));
+  }
+
+  private async saveUnlocked(profile: StoredProfile): Promise<void> {
     const validated = validateProfile(profile);
     const directory = path.dirname(this.filePath);
     const temporaryFile = path.join(
       directory,
-      `.${path.basename(this.filePath)}.${process.pid}.${Date.now()}.tmp`,
+      `.${path.basename(this.filePath)}.${randomUUID()}.tmp`,
     );
 
-    await mkdir(directory, { mode: 0o700, recursive: true });
-    await chmod(directory, 0o700);
+    await ensurePrivateDirectory(directory);
     try {
-      await writeFile(temporaryFile, `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o600,
-      });
+      const handle = await open(temporaryFile, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(validated, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await rename(temporaryFile, this.filePath);
       await chmod(this.filePath, 0o600);
+      const directoryHandle = await open(directory, "r");
+      await directoryHandle.sync();
+      await directoryHandle.close();
     } finally {
       await rm(temporaryFile, { force: true });
     }
   }
 
   public async clear(): Promise<void> {
-    await rm(this.filePath, { force: true });
+    await withFileLock(`${this.filePath}.lock`, async () => {
+      await rm(this.filePath, { force: true });
+      const directory = path.dirname(this.filePath);
+      await ensurePrivateDirectory(directory);
+      const directoryHandle = await open(directory, "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    });
   }
 }
 
