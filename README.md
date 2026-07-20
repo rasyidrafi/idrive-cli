@@ -37,11 +37,24 @@ install the IDrive desktop application.
 | `idrive-cli login EMAIL` | Authenticate and link the server |
 | `idrive-cli status` | Show engine and login status |
 | `idrive-cli upload FILE [REMOTE_DIR]` | Upload a file |
-| `idrive-cli ls [REMOTE_PATH] [--json]` | List files and directories |
+| `idrive-cli ls [REMOTE_PATH] [--detailed] [--trash]` | List active or trashed files and directories |
 | `idrive-cli download REMOTE_FILE [DEST]` | Download a file |
 | `idrive-cli mkdir REMOTE_PATH` | Create a directory |
+| `idrive-cli rename SOURCE DEST` | Rename or move a file or directory (`mv` alias) |
+| `idrive-cli copy SOURCE... DEST_DIR` | Server-side copy files or directory trees (`cp` alias) |
 | `idrive-cli rm REMOTE_PATH --yes` | Move a path to trash |
 | `idrive-cli purge REMOTE_PATH --yes` | Permanently delete a path from trash |
+| `idrive-cli trash-ls [REMOTE_PATH]` | List trash with detailed metadata |
+| `idrive-cli trash-restore REMOTE_PATH...` | Restore trash items to their original locations |
+| `idrive-cli trash-empty --yes` | Permanently delete all trash items |
+| `idrive-cli search QUERY [--path PATH] [--trash]` | Search active or trashed items by name |
+| `idrive-cli properties REMOTE_PATH` | Show timestamps, size, and file count where available |
+| `idrive-cli du REMOTE_DIR` | Show recursive directory size and file count |
+| `idrive-cli items-status REMOTE_PATH...` | Check whether files or directories exist |
+| `idrive-cli versions REMOTE_FILE` | List available file-version metadata |
+| `idrive-cli changes [--cursor DECIMAL]` | Read the incremental Cloud Drive change feed |
+| `idrive-cli server-version` | Show the connected Cloud Drive server version |
+| `idrive-cli client-version` | Show the installed transfer-engine version |
 | `idrive-cli quota` | Show storage usage |
 | `idrive-cli stat REMOTE_PATH [--json]` | Show metadata for one path |
 | `idrive-cli ls REMOTE_PATH --recursive` | Recursively list a directory tree |
@@ -67,6 +80,7 @@ Global options include:
 - `--json` emits versioned success/error envelopes for automation.
 - `--quiet` suppresses human-readable output except errors.
 - `--progress` reports observed engine percentages on stderr.
+- `--bwlimit-kbps N` limits upload and download throughput in KB/s.
 - `--retries N` controls retries for safe read operations (default `3`).
 - `--timeout-seconds N` overrides the engine operation timeout.
 - `--temp-dir PATH` places private workspaces below `PATH/idrive-cli` without
@@ -89,8 +103,9 @@ materialized below the destination.
 - Engine hashes are rechecked before every invocation.
 - Package archives reject links, special files, traversal, and oversized input.
 - Downloads use private staging and are published with mode `0600`.
-- `rm` and `purge` require `--yes` for execution and always refuse the Cloud
-  Drive root; dry-run previews do not require confirmation.
+- `rm`, `purge`, and `trash-empty` require `--yes` for execution. Path-based
+  deletion always refuses the Cloud Drive root; dry-run previews do not require
+  confirmation.
 - SSO-only accounts must create an IDrive account password before login.
 
 ## Local Data
@@ -133,6 +148,8 @@ The live suite uses a unique remote directory and removes it after testing.
 - Cloud Drive must already be activated.
 - No continuous sync daemon, streaming server, or HTTP API is included.
 - Transfers are file based; there is no streaming or byte-range interface.
+- Version history is currently metadata-only; selecting or downloading an old
+  version has not been validated against Cloud Drive.
 - Paths whose segments end in whitespace are rejected because the proprietary
   engine trims `--files-from` lines and cannot address them reliably.
 - A batch may complete remotely before a local interruption is reported.

@@ -18,21 +18,48 @@ import path from "node:path";
 
 import type { AuthenticationResult } from "./auth-client.js";
 import {
+  buildChangesCommand,
+  buildClientVersionCommand,
+  buildCopyCommand,
   buildDownloadCommand,
   buildDeleteCommand,
+  buildDirectorySizeCommand,
+  buildEmptyTrashCommand,
+  buildItemsStatusCommand,
   buildListCommand,
   buildMkdirCommand,
+  buildPropertiesCommand,
   buildPurgeCommand,
   buildQuotaCommand,
+  buildRenameCommand,
+  buildRestoreTrashCommand,
+  buildSearchCommand,
+  buildServerVersionCommand,
   buildUploadCommand,
+  buildVersionsCommand,
 } from "./engine-commands.js";
 import type { AppLocations } from "./locations.js";
 import { normalizeRemotePath, splitRemoteFilePath } from "./remote-path.js";
 import {
+  parseChangesReport,
+  parseClientVersionReport,
+  parseDirectorySizeReport,
+  parseItemsStatusReport,
   parseListReport,
+  parsePropertiesReport,
   parseQuotaReport,
+  parseSearchReport,
+  parseServerVersionReport,
+  parseVersionsReport,
+  type CloudDriveChanges,
+  type CloudDriveDirectorySize,
+  type CloudDriveEngineVersion,
   type CloudDriveEntry,
+  type CloudDriveItemStatus,
+  type CloudDriveProperties,
   type CloudDriveQuota,
+  type CloudDriveSearchResult,
+  type CloudDriveVersion,
 } from "./report-parser.js";
 import type { StoredProfile } from "./types.js";
 import type { CommandResult } from "./process-runner.js";
@@ -76,12 +103,23 @@ export async function prepareDownloadDirectory(destination: string, remotePath: 
 }
 
 export interface OperationOptions {
+  bandwidthKbps?: number;
   dryRun?: boolean;
   onProgress?: (percent: number) => void;
   retries?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
   transfers?: number;
+}
+
+export interface ListOperationOptions extends OperationOptions {
+  detailed?: boolean;
+  trash?: boolean;
+}
+
+export interface SearchOperationOptions extends OperationOptions {
+  remotePath?: string;
+  trash?: boolean;
 }
 
 export interface ClientStatus {
@@ -121,8 +159,16 @@ export interface TransferEngine {
     signal?: AbortSignal,
     onProgress?: (percent: number) => void,
   ): Promise<CommandResult>;
+  executeLocal?(
+    arguments_: readonly string[],
+    timeoutMs?: number,
+    signal?: AbortSignal,
+  ): Promise<CommandResult>;
   isInstalled(): Promise<boolean>;
 }
+
+const RESULT_REPORT_MAX_BYTES = 16 * 1024 * 1024;
+const ERROR_REPORT_MAX_BYTES = 1024 * 1024;
 
 export class CloudDriveClient {
   public constructor(
@@ -221,6 +267,7 @@ export class CloudDriveClient {
     remoteDirectory = "/",
     options: OperationOptions = {},
   ): Promise<void> {
+    validateOperationOptions(options);
     const source = path.resolve(localFile);
     const sourceStat = await lstat(source);
     if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
@@ -242,6 +289,7 @@ export class CloudDriveClient {
       await snapshotFile(source, path.join(snapshotRoot, path.basename(source)), sourceStat, options.signal);
       await writeFile(files, `${path.basename(source)}\n`, { mode: 0o600 });
       const arguments_ = buildUploadCommand(profile, {
+        ...(options.bandwidthKbps === undefined ? {} : { bandwidthKbps: options.bandwidthKbps }),
         errorFile: errors,
         fileList: files,
         localRoot: snapshotRoot,
@@ -260,6 +308,7 @@ export class CloudDriveClient {
     options: OperationOptions = {},
     prepareRemote?: () => Promise<void>,
   ): Promise<void> {
+    validateOperationOptions(options);
     normalizeRemotePath(remoteDirectory);
     if (relativeFiles.length === 0) {
       if (!options.dryRun) await prepareRemote?.();
@@ -294,6 +343,7 @@ export class CloudDriveClient {
       await prepareRemote?.();
       await writeFile(files, `${sources.map((source) => source.normalized).join("\n")}\n`, { mode: 0o600 });
       await this.execute(profile, buildUploadCommand(profile, {
+        ...(options.bandwidthKbps === undefined ? {} : { bandwidthKbps: options.bandwidthKbps }),
         errorFile: errors, fileList: files, localRoot: snapshotRoot, remoteDirectory,
         reportFile: report, tempDirectory: temporary,
       }), errors, "upload", options.signal, options.timeoutMs, options.onProgress);
@@ -305,6 +355,7 @@ export class CloudDriveClient {
     destination = ".",
     options: OperationOptions = {},
   ): Promise<string[]> {
+    validateOperationOptions(options);
     if (remoteFiles.length === 0) return [];
     const normalizedFiles = remoteFiles.map((file) => {
       const normalized = normalizeRemotePath(file);
@@ -328,6 +379,7 @@ export class CloudDriveClient {
       await mkdir(staging, { mode: 0o700 });
       await writeFile(files, `${normalizedFiles.map((file) => `/${file}`).join("\n")}\n`, { mode: 0o600 });
       await this.execute(profile, buildDownloadCommand(profile, {
+        ...(options.bandwidthKbps === undefined ? {} : { bandwidthKbps: options.bandwidthKbps }),
         destination: staging, errorFile: errors, fileList: files,
         reportFile: report, tempDirectory: temporary,
       }), errors, "download", options.signal, options.timeoutMs, options.onProgress);
@@ -340,7 +392,8 @@ export class CloudDriveClient {
     });
   }
 
-  public async list(remotePath = "/", options: OperationOptions = {}): Promise<CloudDriveEntry[]> {
+  public async list(remotePath = "/", options: ListOperationOptions = {}): Promise<CloudDriveEntry[]> {
+    validateOperationOptions(options);
     const profile = await this.requireProfile();
     let lastError: unknown;
     const attempts = options.retries ?? 5;
@@ -350,7 +403,7 @@ export class CloudDriveClient {
       } catch (error) {
         lastError = error;
         if (!(error instanceof IdriveError && error.retryable) || attempt === attempts) throw error;
-        await delay(Math.min(4_000, 250 * 2 ** (attempt - 1)), options.signal);
+        await delay(Math.min(4_000, 250 * 2 ** (attempt - 1)), options.signal, "list");
       }
     }
     throw lastError;
@@ -359,18 +412,20 @@ export class CloudDriveClient {
   private async listAttempt(
     profile: StoredProfile,
     remotePath: string,
-    options: OperationOptions,
+    options: ListOperationOptions,
   ): Promise<CloudDriveEntry[]> {
     return await this.withOperationWorkspace(async (workspace) => {
       const report = path.join(workspace, "report.xml");
       const errors = path.join(workspace, "errors.xml");
       const arguments_ = buildListCommand(profile, {
+        ...(options.detailed === undefined ? {} : { detailed: options.detailed }),
         errorFile: errors,
         remotePath,
         reportFile: report,
+        ...(options.trash === undefined ? {} : { trash: options.trash }),
       });
       await this.execute(profile, arguments_, errors, "list", options.signal, options.timeoutMs, options.onProgress);
-      const reportText = await readTextFileLimited(report, 16 * 1024 * 1024);
+      const reportText = await readTextFileLimited(report, RESULT_REPORT_MAX_BYTES);
       try {
         return parseListReport(reportText);
       } catch (error) {
@@ -388,6 +443,7 @@ export class CloudDriveClient {
   }
 
   public async stat(remotePath: string, options: OperationOptions = {}): Promise<CloudDriveEntry | null> {
+    validateOperationOptions(options);
     const normalized = normalizeRemotePath(remotePath);
     if (!normalized) return { name: "", type: "directory" };
     const { directory, fileName } = splitRemoteFilePath(normalized);
@@ -398,6 +454,7 @@ export class CloudDriveClient {
     remotePath = "/",
     options: OperationOptions = {},
   ): Promise<RecursiveCloudDriveEntry[]> {
+    validateOperationOptions(options);
     const root = normalizeRemotePath(remotePath);
     const result: RecursiveCloudDriveEntry[] = [];
     const visit = async (directory: string): Promise<void> => {
@@ -418,6 +475,7 @@ export class CloudDriveClient {
     destination = ".",
     options: OperationOptions = {},
   ): Promise<string> {
+    validateOperationOptions(options);
     const normalized = normalizeRemotePath(remoteFile);
     if (normalized.length === 0) {
       throw new Error("A remote file path is required");
@@ -438,6 +496,7 @@ export class CloudDriveClient {
       await mkdir(staging, { mode: 0o700 });
       await writeFile(files, `/${normalized}\n`, { mode: 0o600 });
       const arguments_ = buildDownloadCommand(profile, {
+        ...(options.bandwidthKbps === undefined ? {} : { bandwidthKbps: options.bandwidthKbps }),
         destination: staging,
         errorFile: errors,
         fileList: files,
@@ -456,6 +515,7 @@ export class CloudDriveClient {
   }
 
   public async createDirectory(remotePath: string, options: OperationOptions = {}): Promise<void> {
+    validateOperationOptions(options);
     if (!normalizeRemotePath(remotePath)) throw new IdriveError("usage", "Cannot create the Cloud Drive root");
     if (options.dryRun) return;
     const profile = await this.requireProfile();
@@ -467,6 +527,165 @@ export class CloudDriveClient {
       });
       await this.execute(profile, arguments_, errors, "mkdir", options.signal, options.timeoutMs, options.onProgress);
     });
+  }
+
+  public async renameRemote(
+    oldPath: string,
+    newPath: string,
+    options: OperationOptions = {},
+  ): Promise<void> {
+    validateOperationOptions(options);
+    const oldNormalized = requiredRemotePath(oldPath, "rename source");
+    const newNormalized = requiredRemotePath(newPath, "rename destination");
+    if (oldNormalized === newNormalized) throw new IdriveError("usage", "Rename source and destination are identical");
+    if (options.dryRun) return;
+    await this.runReportMutation("rename", options, (profile, reportFile, errorFile) =>
+      buildRenameCommand(profile, { errorFile, newPath: newNormalized, oldPath: oldNormalized, reportFile }));
+  }
+
+  public async copyRemote(
+    remotePaths: readonly string[],
+    destination: string,
+    options: OperationOptions = {},
+  ): Promise<void> {
+    validateOperationOptions(options);
+    const sources = normalizeRequiredPaths(remotePaths, "copy source");
+    normalizeRemotePath(destination);
+    if (options.dryRun) return;
+    await this.runFileListMutation("copy", sources, options, (profile, fileList, reportFile, errorFile) =>
+      buildCopyCommand(profile, { destination, errorFile, fileList, reportFile }));
+  }
+
+  public async listTrash(
+    remotePath = "/",
+    options: OperationOptions = {},
+  ): Promise<CloudDriveEntry[]> {
+    return await this.list(remotePath, { ...options, detailed: true, trash: true });
+  }
+
+  public async restoreTrash(
+    remotePaths: readonly string[],
+    options: OperationOptions = {},
+  ): Promise<void> {
+    validateOperationOptions(options);
+    const paths = normalizeRequiredPaths(remotePaths, "trash path");
+    if (options.dryRun) return;
+    await this.runFileListMutation("trash restore", paths, options, (profile, fileList, reportFile, errorFile) =>
+      buildRestoreTrashCommand(profile, { errorFile, fileList, reportFile }));
+  }
+
+  public async emptyTrash(options: OperationOptions = {}): Promise<void> {
+    validateOperationOptions(options);
+    if (options.dryRun) return;
+    await this.runReportMutation("empty trash", options, (profile, reportFile, errorFile) =>
+      buildEmptyTrashCommand(profile, { errorFile, reportFile }));
+  }
+
+  public async search(
+    query: string,
+    options: SearchOperationOptions = {},
+  ): Promise<CloudDriveSearchResult> {
+    if (query.trim().length === 0 || /[\0\n\r]/.test(query)) {
+      throw new IdriveError("usage", "A valid Cloud Drive search query is required");
+    }
+    return await this.runParsedReport("search", options, parseSearchReport, (profile, reportFile, errorFile) =>
+      buildSearchCommand(profile, {
+        errorFile,
+        query,
+        ...(options.remotePath === undefined ? {} : { remotePath: options.remotePath }),
+        reportFile,
+        ...(options.trash === undefined ? {} : { trash: options.trash }),
+      }));
+  }
+
+  public async properties(
+    remotePath: string,
+    options: OperationOptions = {},
+  ): Promise<CloudDriveProperties> {
+    const normalized = requiredRemotePath(remotePath, "remote path");
+    return await this.runParsedReport("properties", options, parsePropertiesReport, (profile, reportFile, errorFile) =>
+      buildPropertiesCommand(profile, { errorFile, remotePath: normalized, reportFile }));
+  }
+
+  public async directorySize(
+    remotePath: string,
+    options: OperationOptions = {},
+  ): Promise<CloudDriveDirectorySize> {
+    const normalized = requiredRemotePath(remotePath, "directory path");
+    return await this.runParsedReport("directory size", options, parseDirectorySizeReport, (profile, reportFile, errorFile) =>
+      buildDirectorySizeCommand(profile, { errorFile, remotePath: normalized, reportFile }));
+  }
+
+  public async itemsStatus(
+    remotePaths: readonly string[],
+    options: OperationOptions = {},
+  ): Promise<CloudDriveItemStatus[]> {
+    const paths = normalizeRequiredPaths(remotePaths, "status path");
+    return await this.runFileListReport("item status", paths, options, parseItemsStatusReport,
+      (profile, fileList, reportFile, errorFile) => buildItemsStatusCommand(profile, { errorFile, fileList, reportFile }), true);
+  }
+
+  public async versions(
+    remotePath: string,
+    options: OperationOptions = {},
+  ): Promise<CloudDriveVersion[]> {
+    const normalized = requiredRemotePath(remotePath, "file path");
+    return await this.runParsedReport("versions", options, parseVersionsReport, (profile, reportFile, errorFile) =>
+      buildVersionsCommand(profile, { errorFile, remotePath: normalized, reportFile }));
+  }
+
+  public async changes(
+    cursor = "0",
+    options: OperationOptions = {},
+  ): Promise<CloudDriveChanges> {
+    if (!/^\d+$/.test(cursor)) throw new IdriveError("usage", "Cloud Drive change cursor must contain only digits");
+    const result = await this.runParsedReport("changes", options, parseChangesReport, (profile, reportFile, errorFile) =>
+      buildChangesCommand(profile, { cursor, errorFile, reportFile }));
+    return {
+      ...result,
+      nextCursor: maxDecimalCursor(cursor, result.nextCursor),
+    };
+  }
+
+  public async serverVersion(options: OperationOptions = {}): Promise<CloudDriveEngineVersion> {
+    return await this.runParsedReport("server version", options, parseServerVersionReport,
+      (profile, reportFile, errorFile) => buildServerVersionCommand(profile, { errorFile, reportFile }), true);
+  }
+
+  public async clientVersion(options: OperationOptions = {}): Promise<CloudDriveEngineVersion> {
+    validateOperationOptions(options);
+    await this.requireEngine();
+    const profile = await this.config.load();
+    let result: CommandResult;
+    try {
+      const arguments_ = buildClientVersionCommand();
+      const timeoutMs = options.timeoutMs ?? operationTimeout("client version");
+      if (profile) {
+        result = await this.engine.execute(profile, arguments_, timeoutMs, options.signal);
+      } else {
+        if (!this.engine.executeLocal) {
+          throw new IdriveError("engine", "The configured transfer engine cannot run local commands", "client version");
+        }
+        result = await this.engine.executeLocal(arguments_, timeoutMs, options.signal);
+      }
+    } catch (error) {
+      if (error instanceof IdriveError) throw error;
+      if (options.signal?.aborted) {
+        throw new IdriveError("cancelled", "IDrive client version was cancelled", "client version", false, { cause: error });
+      }
+      throw new IdriveError("engine", error instanceof Error ? error.message : String(error), "client version", false, { cause: error });
+    }
+    if (options.signal?.aborted) {
+      throw new IdriveError("cancelled", "IDrive client version was cancelled", "client version");
+    }
+    if (result.code !== 0) {
+      throw new IdriveError("engine", `IDrive client version failed with code ${result.code}: ${sanitizeDetail(result.stderr || result.stdout)}`, "client version");
+    }
+    try {
+      return parseClientVersionReport(`${result.stdout}\n${result.stderr}`);
+    } catch (error) {
+      throw new IdriveError("engine", "Invalid IDrive client-version report", "client version", false, { cause: error });
+    }
   }
 
   public async remove(remotePath: string, options: OperationOptions = {}): Promise<void> {
@@ -482,6 +701,7 @@ export class CloudDriveClient {
     permanent: boolean,
     options: OperationOptions,
   ): Promise<void> {
+    validateOperationOptions(options);
     const normalized = normalizeRemotePath(remotePath);
     if (normalized.length === 0) {
       throw new IdriveError("usage", "Refusing to delete the Cloud Drive root");
@@ -514,6 +734,7 @@ export class CloudDriveClient {
   }
 
   public async quota(options: OperationOptions = {}): Promise<CloudDriveQuota> {
+    validateOperationOptions(options);
     const profile = await this.requireProfile();
     return await this.runQuota(profile, "quota", options);
   }
@@ -533,7 +754,7 @@ export class CloudDriveClient {
         if (!isTransientQuotaError(error) || attempt === attempts) {
           throw error;
         }
-        await delay(Math.min(4_000, 250 * 2 ** (attempt - 1)), options.signal);
+        await delay(Math.min(4_000, 250 * 2 ** (attempt - 1)), options.signal, operation);
       }
     }
     throw lastError;
@@ -579,7 +800,7 @@ export class CloudDriveClient {
     signal?: AbortSignal,
     timeoutMs?: number,
     onProgress?: (percent: number) => void,
-  ): Promise<void> {
+  ): Promise<CommandResult> {
     let result: CommandResult;
     try {
       result = signal
@@ -593,16 +814,113 @@ export class CloudDriveClient {
       const transient = /timed out|temporar|connection|unavailable/i.test(message);
       throw new IdriveError(transient ? "transient" : "engine", message, operation, transient, { cause: error });
     }
-    if (result.code === 0) {
-      return;
-    }
     const report = await readOptionalFile(errorFile);
+    if (result.code === 0 && !hasEngineError(report)) return result;
     const detail = sanitizeDetail(report.trim() || result.stderr.trim() || result.stdout.trim());
     throw new IdriveError("engine",
       `IDrive ${operation} failed with code ${result.code}${detail ? `: ${detail}` : ""}`,
       operation,
       isTransientEngineDetail(detail),
     );
+  }
+
+  private async runParsedReport<T>(
+    operation: string,
+    options: OperationOptions,
+    parse: (report: string) => T,
+    build: (profile: StoredProfile, reportFile: string, errorFile: string) => string[],
+    includeStdout = false,
+  ): Promise<T> {
+    validateOperationOptions(options);
+    const profile = await this.requireProfile();
+    return await this.runReadWithRetry(operation, options, async () =>
+      await this.withOperationWorkspace(async (workspace) => {
+        const reportFile = path.join(workspace, "report.xml");
+        const errorFile = path.join(workspace, "errors.xml");
+        const result = await this.execute(profile, build(profile, reportFile, errorFile), errorFile,
+          operation, options.signal, options.timeoutMs, options.onProgress);
+        const report = await readOptionalFile(reportFile, RESULT_REPORT_MAX_BYTES);
+        const parseInput = includeStdout ? `${report}\n${result.stdout}` : report;
+        rejectEngineErrorReport(parseInput, operation);
+        try {
+          return parse(parseInput);
+        } catch (error) {
+          throw new IdriveError("engine", `Invalid IDrive ${operation} report`, operation, false, { cause: error });
+        }
+      }));
+  }
+
+  private async runReportMutation(
+    operation: string,
+    options: OperationOptions,
+    build: (profile: StoredProfile, reportFile: string, errorFile: string) => string[],
+  ): Promise<void> {
+    validateOperationOptions(options);
+    const profile = await this.requireProfile();
+    await this.withOperationWorkspace(async (workspace) => {
+      const reportFile = path.join(workspace, "report.xml");
+      const errorFile = path.join(workspace, "errors.xml");
+      await this.execute(profile, build(profile, reportFile, errorFile), errorFile,
+        operation, options.signal, options.timeoutMs, options.onProgress);
+      const report = await readOptionalFile(reportFile, RESULT_REPORT_MAX_BYTES);
+      if (hasEngineError(report)) throw new IdriveError("engine", `IDrive ${operation} failed: ${sanitizeDetail(report)}`, operation);
+    });
+  }
+
+  private async runFileListMutation(
+    operation: string,
+    remotePaths: readonly string[],
+    options: OperationOptions,
+    build: (profile: StoredProfile, fileList: string, reportFile: string, errorFile: string) => string[],
+  ): Promise<void> {
+    await this.runFileListReport(operation, remotePaths, options, () => undefined, build);
+  }
+
+  private async runFileListReport<T>(
+    operation: string,
+    remotePaths: readonly string[],
+    options: OperationOptions,
+    parse: (report: string) => T,
+    build: (profile: StoredProfile, fileList: string, reportFile: string, errorFile: string) => string[],
+    retryableRead = false,
+  ): Promise<T> {
+    validateOperationOptions(options);
+    const profile = await this.requireProfile();
+    const attempt = async (): Promise<T> => await this.withOperationWorkspace(async (workspace) => {
+      const fileList = path.join(workspace, "files.txt");
+      const reportFile = path.join(workspace, "report.xml");
+      const errorFile = path.join(workspace, "errors.xml");
+      await writeFile(fileList, `${remotePaths.map((remotePath) => `/${remotePath}`).join("\n")}\n`, { mode: 0o600 });
+      await this.execute(profile, build(profile, fileList, reportFile, errorFile), errorFile,
+        operation, options.signal, options.timeoutMs, options.onProgress);
+      const report = await readOptionalFile(reportFile, RESULT_REPORT_MAX_BYTES);
+      rejectEngineErrorReport(report, operation);
+      try {
+        return parse(report);
+      } catch (error) {
+        throw new IdriveError("engine", `Invalid IDrive ${operation} report`, operation, false, { cause: error });
+      }
+    });
+    return retryableRead ? await this.runReadWithRetry(operation, options, attempt) : await attempt();
+  }
+
+  private async runReadWithRetry<T>(
+    operation: string,
+    options: OperationOptions,
+    attempt: () => Promise<T>,
+  ): Promise<T> {
+    let lastError: unknown;
+    const attempts = options.retries ?? 5;
+    for (let attemptNumber = 1; attemptNumber <= attempts; attemptNumber++) {
+      try {
+        return await attempt();
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof IdriveError && error.retryable) || attemptNumber === attempts) throw error;
+        await delay(Math.min(4_000, 250 * 2 ** (attemptNumber - 1)), options.signal, operation);
+      }
+    }
+    throw lastError;
   }
 
   private async validatePrivateProfile(profile: StoredProfile, signal?: AbortSignal): Promise<void> {
@@ -637,9 +955,9 @@ async function hasLiveWorkspaceOwner(workspace: string): Promise<boolean> {
   }
 }
 
-async function readOptionalFile(file: string): Promise<string> {
+async function readOptionalFile(file: string, maxBytes = ERROR_REPORT_MAX_BYTES): Promise<string> {
   try {
-    return await readTextFileLimited(file, 1024 * 1024);
+    return await readTextFileLimited(file, maxBytes);
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
       return "";
@@ -652,7 +970,7 @@ async function parseQuotaOperation(
   reportFile: string,
   errorFile: string,
 ): Promise<CloudDriveQuota> {
-  const report = await readOptionalFile(reportFile);
+  const report = await readOptionalFile(reportFile, RESULT_REPORT_MAX_BYTES);
   try {
     return parseQuotaReport(report);
   } catch (error) {
@@ -671,6 +989,61 @@ function safeLocalName(value: string): void {
   if (/\s$/.test(value)) {
     throw new Error("Local file names ending in whitespace are unsupported by the IDrive engine");
   }
+}
+
+function requiredRemotePath(value: string, label: string): string {
+  const normalized = normalizeRemotePath(value);
+  if (!normalized) throw new IdriveError("usage", `A ${label} is required`);
+  return normalized;
+}
+
+function normalizeRequiredPaths(values: readonly string[], label: string): string[] {
+  if (values.length === 0) throw new IdriveError("usage", `At least one ${label} is required`);
+  return values.map((value) => requiredRemotePath(value, label));
+}
+
+function validateOperationOptions(options: OperationOptions): void {
+  if (options.retries !== undefined
+    && (!Number.isSafeInteger(options.retries) || options.retries < 1 || options.retries > 10)) {
+    throw new IdriveError("usage", "retries must be an integer between 1 and 10");
+  }
+  if (options.timeoutMs !== undefined
+    && (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > 2_147_483_647)) {
+    throw new IdriveError("usage", "timeoutMs must be positive and no greater than 2147483647");
+  }
+  if (options.bandwidthKbps !== undefined
+    && (!Number.isSafeInteger(options.bandwidthKbps) || options.bandwidthKbps < 1 || options.bandwidthKbps > 1_000_000_000)) {
+    throw new IdriveError("usage", "bandwidthKbps must be an integer between 1 and 1000000000");
+  }
+  if (options.transfers !== undefined
+    && (!Number.isSafeInteger(options.transfers) || options.transfers < 1 || options.transfers > 16)) {
+    throw new IdriveError("usage", "transfers must be an integer between 1 and 16");
+  }
+}
+
+function maxDecimalCursor(left: string, right: string): string {
+  const normalizedLeft = left.replace(/^0+(?=\d)/, "");
+  const normalizedRight = right.replace(/^0+(?=\d)/, "");
+  if (normalizedLeft.length !== normalizedRight.length) {
+    return normalizedLeft.length > normalizedRight.length ? left : right;
+  }
+  return normalizedLeft.localeCompare(normalizedRight) >= 0 ? left : right;
+}
+
+function hasEngineError(report: string): boolean {
+  return /<tree\b[^>]*\bmessage=["']ERROR["']|\bop_status=["']failed["']|@ERROR:|invalid parameter/i.test(report);
+}
+
+function rejectEngineErrorReport(report: string, operation: string): void {
+  if (!hasEngineError(report)) return;
+  const detail = sanitizeDetail(report);
+  const transient = isTransientEngineDetail(detail);
+  throw new IdriveError(
+    transient ? "transient" : "engine",
+    `IDrive ${operation} failed${detail ? `: ${detail}` : ""}`,
+    operation,
+    transient,
+  );
 }
 
 function operationTimeout(operation: string): number {
@@ -873,13 +1246,21 @@ function sanitizeDetail(value: string): string {
   }).join("").slice(0, 4_000);
 }
 
-async function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+async function delay(milliseconds: number, signal: AbortSignal | undefined, operation: string): Promise<void> {
+  if (signal?.aborted) {
+    throw new IdriveError("cancelled", `IDrive ${operation} was cancelled`, operation);
+  }
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal?.addEventListener("abort", () => {
+    const onAbort = (): void => {
       clearTimeout(timer);
-      reject(new Error("IDrive operation was aborted"));
-    }, { once: true });
+      signal?.removeEventListener("abort", onAbort);
+      reject(new IdriveError("cancelled", `IDrive ${operation} was cancelled`, operation));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

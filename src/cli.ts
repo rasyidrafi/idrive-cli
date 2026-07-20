@@ -24,8 +24,10 @@ interface LoginCommandOptions {
 }
 
 interface ListCommandOptions {
+  detailed?: boolean;
   json?: boolean;
   recursive?: boolean;
+  trash?: boolean;
 }
 
 const locations = defaultLocations();
@@ -56,13 +58,14 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
     .option("--json", "print machine-readable output where supported")
     .option("--quiet", "suppress successful human-readable output")
     .option("--progress", "show engine transfer progress on stderr")
+    .option("--bwlimit-kbps <kilobytes>", "limit upload/download bandwidth in KB/s")
     .option("--retries <count>", "retry count for safe read operations", "3")
     .option("--temp-dir <path>", "private transfer workspace directory")
     .option("--timeout-seconds <seconds>", "engine operation timeout")
     .option("--transfers <count>", "maximum concurrent batch transfers", "1")
     .showHelpAfterError();
-  const operationOptions = (): { dryRun?: boolean; onProgress?: (percent: number) => void; retries: number; signal: AbortSignal; timeoutMs?: number; transfers: number } => {
-    const options = program.opts<{ dryRun?: boolean; json?: boolean; progress?: boolean; quiet?: boolean; retries: string; tempDir?: string; timeoutSeconds?: string; transfers: string }>();
+  const operationOptions = (): { bandwidthKbps?: number; dryRun?: boolean; onProgress?: (percent: number) => void; retries: number; signal: AbortSignal; timeoutMs?: number; transfers: number } => {
+    const options = program.opts<{ bwlimitKbps?: string; dryRun?: boolean; json?: boolean; progress?: boolean; quiet?: boolean; retries: string; tempDir?: string; timeoutSeconds?: string; transfers: string }>();
     const retries = Number(options.retries);
     if (!Number.isSafeInteger(retries) || retries < 1 || retries > 10) {
       throw new IdriveError("usage", "retries must be an integer between 1 and 10");
@@ -74,12 +77,17 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
     if (options.progress && transfers > 1) {
       throw new IdriveError("usage", "progress requires --transfers 1");
     }
+    const bandwidthKbps = options.bwlimitKbps === undefined ? undefined : Number(options.bwlimitKbps);
+    if (bandwidthKbps !== undefined && (!Number.isSafeInteger(bandwidthKbps) || bandwidthKbps < 1 || bandwidthKbps > 1_000_000_000)) {
+      throw new IdriveError("usage", "bwlimit-kbps must be an integer between 1 and 1000000000");
+    }
     if (options.tempDir) locations.temporaryDirectory = path.join(path.resolve(options.tempDir), "idrive-cli");
     const seconds = options.timeoutSeconds === undefined ? undefined : Number(options.timeoutSeconds);
     if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0 || seconds > 2_147_483)) {
       throw new IdriveError("usage", "timeout-seconds must be positive and no greater than 2147483");
     }
     return {
+      ...(bandwidthKbps === undefined ? {} : { bandwidthKbps }),
       ...(options.dryRun ? { dryRun: true } : {}),
       retries,
       signal: controller.signal,
@@ -191,11 +199,18 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
     .description("List a Cloud Drive directory")
     .argument("[remote-path]", "Cloud Drive directory", "/")
     .option("--json", "print machine-readable JSON")
+    .option("--detailed", "include version, checksum, thumbnail, and trash metadata")
     .option("--recursive", "list all descendants")
+    .option("--trash", "list items in Cloud Drive trash")
     .action(async (remotePath: string, options: ListCommandOptions) => {
+      if (options.recursive && options.trash) throw new IdriveError("usage", "recursive trash listing is not supported");
       const entries = options.recursive
         ? await client.listRecursive(remotePath, operationOptions())
-        : await client.list(remotePath, operationOptions());
+        : await client.list(remotePath, {
+            ...operationOptions(),
+            ...(options.detailed === undefined ? {} : { detailed: options.detailed }),
+            ...(options.trash === undefined ? {} : { trash: options.trash }),
+          });
       if (options.json || program.opts<{ json?: boolean }>().json) {
         process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "ls", data: entries })}\n`);
         return;
@@ -226,6 +241,36 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
       writeSuccess(`${operationOptions().dryRun ? "Would create" : "Created"} /${remotePath.replace(/^\/+|\/+$/g, "")}\n`, { dryRun: operationOptions().dryRun === true, remotePath });
     });
 
+  program.command("rename")
+    .alias("mv")
+    .description("Rename or move one Cloud Drive file or directory")
+    .argument("<source>", "existing Cloud Drive path")
+    .argument("<destination>", "new Cloud Drive path")
+    .action(async (source: string, destination: string) => {
+      await client.renameRemote(source, destination, operationOptions());
+      writeSuccess(`${operationOptions().dryRun ? "Would rename" : "Renamed"} /${normalizeRemotePath(source)} to /${normalizeRemotePath(destination)}\n`, {
+        destination,
+        dryRun: operationOptions().dryRun === true,
+        source,
+      });
+    });
+
+  program.command("copy")
+    .alias("cp")
+    .description("Copy Cloud Drive files or directories within the account")
+    .argument("<paths...>", "one or more source paths followed by the destination directory")
+    .action(async (paths: string[]) => {
+      if (paths.length < 2) throw new IdriveError("usage", "copy requires at least one source and one destination");
+      const destination = paths.at(-1) ?? "";
+      const sources = paths.slice(0, -1);
+      await client.copyRemote(sources, destination, operationOptions());
+      writeSuccess(`${operationOptions().dryRun ? "Would copy" : "Copied"} ${sources.length} item${sources.length === 1 ? "" : "s"} to /${normalizeRemotePath(destination)}\n`, {
+        destination,
+        dryRun: operationOptions().dryRun === true,
+        sources,
+      });
+    });
+
   program.command("rm")
     .description("Move one Cloud Drive file or directory tree to trash")
     .argument("<remote-path>", "Cloud Drive path to remove")
@@ -247,6 +292,122 @@ export async function main(arguments_: readonly string[] = process.argv): Promis
         `${operationOptions().dryRun ? "Would permanently delete" : "Permanently deleted"} /${remotePath.replace(/^\/+|\/+$/g, "")} from trash\n`,
         { dryRun: operationOptions().dryRun === true, remotePath },
       );
+    });
+
+  program.command("trash-ls")
+    .description("List files and directories in Cloud Drive trash")
+    .argument("[remote-path]", "trash directory", "/")
+    .action(async (remotePath: string) => {
+      const entries = await client.listTrash(remotePath, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) {
+        process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "trash-ls", data: entries })}\n`);
+      } else if (!program.opts<{ quiet?: boolean }>().quiet) {
+        for (const entry of entries) process.stdout.write(`${entry.type === "directory" ? "d" : "f"}\t${entry.size ?? "-"}\t${entry.name}\n`);
+      }
+    });
+
+  program.command("trash-restore")
+    .description("Restore files or directories from Cloud Drive trash to their original locations")
+    .argument("<remote-paths...>", "trash paths to restore")
+    .action(async (remotePaths: string[]) => {
+      await client.restoreTrash(remotePaths, operationOptions());
+      writeSuccess(`${operationOptions().dryRun ? "Would restore" : "Restored"} ${remotePaths.length} trash item${remotePaths.length === 1 ? "" : "s"}\n`, {
+        dryRun: operationOptions().dryRun === true,
+        remotePaths,
+      });
+    });
+
+  program.command("trash-empty")
+    .description("Permanently delete every item in Cloud Drive trash")
+    .option("--yes", "confirm permanent deletion of all trash")
+    .action(async (options: { yes?: boolean }) => {
+      if (!options.yes && !operationOptions().dryRun) throw new IdriveError("usage", "required option '--yes' not specified");
+      await client.emptyTrash(operationOptions());
+      writeSuccess(`${operationOptions().dryRun ? "Would empty" : "Emptied"} Cloud Drive trash\n`, {
+        dryRun: operationOptions().dryRun === true,
+      });
+    });
+
+  program.command("search")
+    .description("Search Cloud Drive by file or directory name")
+    .argument("<query>", "search query")
+    .option("--path <remote-path>", "scope search to a Cloud Drive directory", "/")
+    .option("--trash", "search deleted items")
+    .action(async (query: string, options: { path: string; trash?: boolean }) => {
+      const result = await client.search(query, {
+        ...operationOptions(),
+        remotePath: options.path,
+        ...(options.trash === undefined ? {} : { trash: options.trash }),
+      });
+      if (program.opts<{ json?: boolean }>().json) {
+        process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "search", data: result })}\n`);
+      } else if (!program.opts<{ quiet?: boolean }>().quiet) {
+        for (const entry of result.entries) process.stdout.write(`${entry.type === "directory" ? "d" : "f"}\t${entry.size ?? "-"}\t${entry.path}\n`);
+      }
+    });
+
+  program.command("properties")
+    .description("Show detailed properties for a Cloud Drive path")
+    .argument("<remote-path>")
+    .action(async (remotePath: string) => {
+      const properties = await client.properties(remotePath, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "properties", data: properties })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) for (const [key, value] of Object.entries(properties)) process.stdout.write(`${key}\t${value}\n`);
+    });
+
+  program.command("du")
+    .description("Show recursive size and file count for a Cloud Drive directory")
+    .argument("<remote-path>")
+    .action(async (remotePath: string) => {
+      const result = await client.directorySize(remotePath, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "du", data: result })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) process.stdout.write(`${result.size}\t${result.fileCount}\t/${normalizeRemotePath(remotePath)}\n`);
+    });
+
+  program.command("items-status")
+    .description("Check whether Cloud Drive files or directories exist")
+    .argument("<remote-paths...>")
+    .action(async (remotePaths: string[]) => {
+      const result = await client.itemsStatus(remotePaths, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "items-status", data: result })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) for (const item of result) process.stdout.write(`${item.exists ? "exists" : "missing"}\t${item.type ?? "unknown"}\t${item.path}\n`);
+    });
+
+  program.command("versions")
+    .description("List previous versions of a Cloud Drive file")
+    .argument("<remote-path>")
+    .action(async (remotePath: string) => {
+      const versions = await client.versions(remotePath, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "versions", data: versions })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) for (const item of versions) process.stdout.write(`${item.version}\t${item.size}\t${item.modifiedAt}\n`);
+    });
+
+  program.command("changes")
+    .description("Read incremental Cloud Drive changes after a decimal cursor")
+    .option("--cursor <cursor>", "last processed change cursor", "0")
+    .action(async (options: { cursor: string }) => {
+      const changes = await client.changes(options.cursor, operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "changes", data: changes })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) {
+        for (const change of changes.changes) process.stdout.write(`${change.cursor}\t${change.trashState}\t${change.path}\n`);
+        process.stdout.write(`Next cursor: ${changes.nextCursor}\n`);
+      }
+    });
+
+  program.command("server-version")
+    .description("Show the connected Cloud Drive server version")
+    .action(async () => {
+      const result = await client.serverVersion(operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "server-version", data: result })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) process.stdout.write(`${result.raw}\n`);
+    });
+
+  program.command("client-version")
+    .description("Show the installed Cloud Drive transfer-engine version")
+    .action(async () => {
+      const result = await client.clientVersion(operationOptions());
+      if (program.opts<{ json?: boolean }>().json) process.stdout.write(`${JSON.stringify({ schemaVersion: 1, command: "client-version", data: result })}\n`);
+      else if (!program.opts<{ quiet?: boolean }>().quiet) process.stdout.write(`${result.raw}\n`);
     });
 
   program.command("quota")

@@ -89,6 +89,20 @@ export class EngineRunner {
     );
   }
 
+  public async executeLocal(
+    arguments_: readonly string[],
+    timeoutMs = 2 * 60 * 60 * 1000,
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
+    const directory = await this.verifyIntegrity();
+    return await this.runUtf8(
+      this.enginePath(false, directory),
+      arguments_,
+      timeoutMs,
+      signal,
+    );
+  }
+
   private async runUtf8(
     executable: string,
     arguments_: readonly string[],

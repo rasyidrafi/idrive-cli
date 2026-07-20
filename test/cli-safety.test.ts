@@ -94,6 +94,41 @@ describe("destructive CLI safeguards", () => {
     expect(result.stdout).toMatch(/download-dir/);
     expect(result.stdout).toMatch(/doctor/);
     expect(result.stdout).toMatch(/cleanup/);
+    expect(result.stdout).toMatch(/rename/);
+    expect(result.stdout).toMatch(/copy/);
+    expect(result.stdout).toMatch(/trash-ls/);
+    expect(result.stdout).toMatch(/trash-restore/);
+    expect(result.stdout).toMatch(/trash-empty/);
+    expect(result.stdout).toMatch(/search/);
+    expect(result.stdout).toMatch(/properties/);
+    expect(result.stdout).toMatch(/versions/);
+    expect(result.stdout).toMatch(/changes/);
+    expect(result.stdout).toMatch(/client-version/);
+  });
+
+  it.each(["trash-empty"])("requires --yes for %s", async (command) => {
+    const result = await new ProcessRunner().run(
+      executable,
+      [cli, command],
+      { env: isolatedEnvironment, timeoutMs: 10_000 },
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/required option '--yes'/i);
+  });
+
+  it.each([
+    ["rename", "/Old", "/New"],
+    ["copy", "/Source", "/Destination"],
+    ["trash-restore", "/Deleted"],
+    ["trash-empty"],
+  ])("dry-runs new mutation command %s without credentials", async (...command) => {
+    const result = await new ProcessRunner().run(
+      executable,
+      [cli, "--dry-run", ...command],
+      { env: isolatedEnvironment, timeoutMs: 10_000 },
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/Would/i);
   });
 
   it("emits structured JSON errors with stable exit codes", async () => {
@@ -139,6 +174,15 @@ describe("destructive CLI safeguards", () => {
     const result = await new ProcessRunner().run(
       executable,
       [cli, option, value, "--dry-run", "rm", "/Preview"],
+      { env: isolatedEnvironment, timeoutMs: 10_000 },
+    );
+    expect(result.code).toBe(2);
+  });
+
+  it.each(["0", "1000000001", "not-a-number"])("rejects invalid bandwidth limit %s", async (value) => {
+    const result = await new ProcessRunner().run(
+      executable,
+      [cli, "--bwlimit-kbps", value, "--dry-run", "upload", "/missing", "/"],
       { env: isolatedEnvironment, timeoutMs: 10_000 },
     );
     expect(result.code).toBe(2);
